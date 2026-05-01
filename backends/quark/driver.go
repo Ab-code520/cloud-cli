@@ -284,6 +284,57 @@ func (d *Driver) Copy(ctx context.Context, src *core.Object, destDir *core.Objec
 	return d.api.CopyFile(ctx, src.ID, destID)
 }
 
+func (d *Driver) CreateShare(ctx context.Context, fileIDs []string, expiredDay int) (*struct{ ShareID, URL string }, error) {
+	resp, err := d.api.CreateShare(ctx, fileIDs, expiredDay)
+	if err != nil {
+		return nil, err
+	}
+	return &struct{ ShareID, URL string }{
+		ShareID: resp.ShareID,
+		URL:     resp.URL,
+	}, nil
+}
+
+func (d *Driver) ListShares(ctx context.Context, page, size int) ([]struct{ ShareID, URL, Title string; IsExpired bool; FileCount int; CreatedAt int64 }, error) {
+	resp, err := d.api.ListShares(ctx, page, size)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]struct{ ShareID, URL, Title string; IsExpired bool; FileCount int; CreatedAt int64 }, len(resp.List))
+	for i, item := range resp.List {
+		result[i].ShareID = item.ShareID
+		result[i].URL = item.URL
+		result[i].Title = item.Title
+		result[i].IsExpired = item.IsExpired
+		result[i].FileCount = item.FileCount
+		result[i].CreatedAt = item.CreatedAt
+	}
+	return result, nil
+}
+
+func (d *Driver) DeleteShare(ctx context.Context, shareIDs []string) error {
+	return d.api.DeleteShare(ctx, shareIDs)
+}
+
+func (d *Driver) Search(ctx context.Context, query, pdirFid string, page, size int) ([]*core.Object, error) {
+	resp, err := d.api.SearchFiles(ctx, query, pdirFid, page, size)
+	if err != nil {
+		return nil, err
+	}
+	objects := make([]*core.Object, 0, len(resp.List))
+	for _, item := range resp.List {
+		objects = append(objects, &core.Object{
+			ID:      item.Fid,
+			Name:    item.FileName,
+			Size:    item.Size,
+			IsDir:   item.IsDir,
+			ModTime: time.Unix(item.UpdatedAt, 0),
+			Path:    item.Fid,
+		})
+	}
+	return objects, nil
+}
+
 func (d *Driver) getStatePath(name string, size int64, uploadID string) string {
 	key := fmt.Sprintf("%s_%d_%s", name, size, uploadID)
 	hash := fmt.Sprintf("%x", []byte(key))

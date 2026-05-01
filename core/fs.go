@@ -74,6 +74,18 @@ type Storage interface {
 	// Copy copies a file/folder to a destination directory.
 	Copy(ctx context.Context, src *Object, destDir *Object) error
 
+	// CreateShare creates a share for the given file IDs.
+	CreateShare(ctx context.Context, fileIDs []string, expiredDay int) (*struct{ ShareID, URL string }, error)
+
+	// ListShares lists all shares.
+	ListShares(ctx context.Context, page, size int) ([]struct{ ShareID, URL, Title string; IsExpired bool; FileCount int; CreatedAt int64 }, error)
+
+	// DeleteShare deletes one or more shares.
+	DeleteShare(ctx context.Context, shareIDs []string) error
+
+	// Search searches for files/folders by query.
+	Search(ctx context.Context, query, pdirFid string, page, size int) ([]*Object, error)
+
 	// Close releases any resources held by the driver.
 	Close() error
 }

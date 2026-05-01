@@ -275,6 +275,92 @@ func (a *QuarkAPI) CopyFile(ctx context.Context, srcFid, destDirFid string) erro
 }
 
 // ═══════════════════════════════════════════
+// Share API
+// ═══════════════════════════════════════════
+
+const (
+	apiShareCreate = "/1/clouddrive/share"
+	apiShareList   = "/1/clouddrive/share/list"
+	apiShareDelete = "/1/clouddrive/share/delete"
+)
+
+type ShareCreateReq struct {
+	FidList    []string `json:"fid_list"`
+	ExpiredDay int      `json:"expired_day"` // -1 = permanent
+}
+
+type ShareCreateResp struct {
+	ShareID string `json:"share_id"`
+	URL     string `json:"url"`
+}
+
+func (a *QuarkAPI) CreateShare(ctx context.Context, fids []string, expiredDay int) (*ShareCreateResp, error) {
+	req := ShareCreateReq{
+		FidList:    fids,
+		ExpiredDay: expiredDay,
+	}
+	var resp ShareCreateResp
+	err := a.request(ctx, http.MethodPost, apiShareCreate, req, &resp)
+	return &resp, err
+}
+
+type ShareItem struct {
+	ShareID    string `json:"share_id"`
+	URL        string `json:"url"`
+	Title      string `json:"title"`
+	IsExpired  bool   `json:"is_expired"`
+	FileCount  int    `json:"file_count"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
+type ShareListResp struct {
+	List  []ShareItem `json:"list"`
+	Total int         `json:"total"`
+}
+
+func (a *QuarkAPI) ListShares(ctx context.Context, page, size int) (*ShareListResp, error) {
+	req := map[string]interface{}{
+		"page": page,
+		"size": size,
+	}
+	var resp ShareListResp
+	err := a.request(ctx, http.MethodPost, apiShareList, req, &resp)
+	return &resp, err
+}
+
+func (a *QuarkAPI) DeleteShare(ctx context.Context, shareIDs []string) error {
+	req := map[string]interface{}{
+		"share_id_list": shareIDs,
+	}
+	return a.request(ctx, http.MethodPost, apiShareDelete, req, nil)
+}
+
+// ═══════════════════════════════════════════
+// Search API
+// ═══════════════════════════════════════════
+
+const apiSearch = "/1/clouddrive/file/search"
+
+type SearchReq struct {
+	Q       string `json:"q"`
+	PdirFid string `json:"pdir_fid"`
+	Page    int    `json:"page"`
+	Size    int    `json:"size"`
+}
+
+func (a *QuarkAPI) SearchFiles(ctx context.Context, query, pdirFid string, page, size int) (*ListResp, error) {
+	req := SearchReq{
+		Q:       query,
+		PdirFid: pdirFid,
+		Page:    page,
+		Size:    size,
+	}
+	var resp ListResp
+	err := a.request(ctx, http.MethodPost, apiSearch, req, &resp)
+	return &resp, err
+}
+
+// ═══════════════════════════════════════════
 // QR Login API
 // ═══════════════════════════════════════════
 
