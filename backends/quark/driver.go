@@ -2,7 +2,6 @@ package quark
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -195,9 +194,8 @@ func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, 
 		return nil, fmt.Errorf("precreate failed: %w", err)
 	}
 
-	// Construct auth_meta from precreate response
-	rawMeta := fmt.Sprintf(`{"upload_id":"%s","task_id":"%s","fid":"%s"}`, preResp.UploadID, preResp.TaskID, preResp.FileID)
-	authMetaStr := base64.StdEncoding.EncodeToString([]byte(rawMeta))
+	// Use auth_info from precreate response as auth_meta
+	authMetaStr := preResp.AuthInfo
 
 	if preResp.RapidUpload {
 		return &core.Object{
@@ -226,7 +224,7 @@ func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, 
 		}
 	}
 
-	auth, err := d.api.Auth(ctx, &AuthReq{TaskID: preResp.TaskID, UploadID: uploadID, AuthMeta: json.RawMessage(authMetaStr)})
+	auth, err := d.api.Auth(ctx, &AuthReq{TaskID: preResp.TaskID, UploadID: uploadID, AuthMeta: authMetaStr})
 	if err != nil {
 		return nil, fmt.Errorf("get auth: %w", err)
 	}

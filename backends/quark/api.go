@@ -110,12 +110,12 @@ type PrecreateReq struct {
 }
 
 type PrecreateResp struct {
-	UploadID    string          `json:"upload_id"`
-	TaskID      string          `json:"task_id"`
-	RapidUpload bool            `json:"rapid_upload"`
-	PartSize    int64           `json:"part_size"`
-	FileID      string          `json:"fid"`
-	AuthMeta    json.RawMessage `json:"auth_meta"`
+	UploadID    string `json:"upload_id"`
+	TaskID      string `json:"task_id"`
+	RapidUpload bool   `json:"rapid_upload"`
+	PartSize    int64  `json:"part_size"`
+	FileID      string `json:"fid"`
+	AuthInfo    string `json:"auth_info"`
 }
 
 func (a *QuarkAPI) Precreate(ctx context.Context, req *PrecreateReq) (*PrecreateResp, error) {
@@ -125,9 +125,9 @@ func (a *QuarkAPI) Precreate(ctx context.Context, req *PrecreateReq) (*Precreate
 }
 
 type AuthReq struct {
-	TaskID    string          `json:"task_id"`
-	UploadID  string          `json:"upload_id"`
-	AuthMeta  json.RawMessage `json:"auth_meta"`
+	TaskID    string `json:"task_id"`
+	UploadID  string `json:"upload_id"`
+	AuthMeta  string `json:"auth_meta"`
 }
 
 type AuthResp struct {

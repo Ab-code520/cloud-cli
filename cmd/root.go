@@ -52,7 +52,6 @@ func initDriver(name string, rootPath string) (core.Storage, error) {
 				continue
 			}
 			
-			fmt.Printf("DEBUG: Checking account '%s', type='%s', cookie_len=%d\n", accName, acc.Type, len(acc.Cookie["cookie"]))
 			
 			// Exact match for driver default
 			if accName == targetAccName {
