@@ -1,74 +1,64 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
-	"strings"
-
-	"cloud-cli/core"
-	"cloud-cli/utils"
+	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
 
 var downloadCmd = &cobra.Command{
-	Use:   "download <remote> <local>",
-	Short: "从网盘下载文件",
+	Use:   "download [remote_path] [local_path]",
+	Short: "Download file",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		driver, err := GetDriver()
+		driver, err := getDriver()
 		if err != nil {
 			return err
 		}
-
+		
 		remotePath := args[0]
 		localPath := args[1]
-
-		// 获取文件所在目录和文件名
-		dirPath, fileName := splitPath(remotePath)
 		
-		// 列出目录找到文件
-		objects, err := driver.List(dirPath)
+		obj, err := findObjectByPath(driver, remotePath)
 		if err != nil {
 			return err
 		}
-
-		var targetObj *core.Object
-		for _, obj := range objects {
-			if obj.Name == fileName && !obj.IsDir {
-				targetObj = obj
-				break
-			}
+		
+		if obj.IsDir {
+			return fmt.Errorf("download does not support directories yet")
 		}
-
-		if targetObj == nil {
-			return fmt.Errorf("file not found: %s", remotePath)
-		}
-
-		fmt.Printf("下载中: %s (%s) -> %s\n", targetObj.Name, utils.FormatSize(targetObj.Size), localPath)
-
-		err = driver.Download(targetObj, localPath, threads)
+		
+		reader, err := driver.Open(context.Background(), obj, 0)
 		if err != nil {
 			return err
 		}
-
-		fmt.Printf("✅ 下载完成: %s (%s)\n", targetObj.Name, utils.FormatSize(targetObj.Size))
+		defer reader.Close()
+		
+		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+			return err
+		}
+		
+		out, err := os.Create(localPath)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		
+		fmt.Printf("Downloading %s (%s)...\n", obj.Name, formatSize(obj.Size))
+		
+		// Simple copy, progress bar could be added here via io.TeeReader
+		_, err = io.Copy(out, reader)
+		if err != nil {
+			return err
+		}
+		
+		fmt.Printf("Downloaded to %s\n", localPath)
 		return nil
 	},
-}
-
-// splitPath 分割路径为目录和文件名
-func splitPath(path string) (string, string) {
-	path = strings.TrimPrefix(path, "/")
-	if path == "" {
-		return "/", ""
-	}
-
-	lastSlash := strings.LastIndex(path, "/")
-	if lastSlash == -1 {
-		return "/", path
-	}
-
-	return "/" + path[:lastSlash], path[lastSlash+1:]
 }
 
 func init() {

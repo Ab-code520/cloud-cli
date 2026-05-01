@@ -3,57 +3,52 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
-	"cloud-cli/core"
-
+	"github.com/Ab-code520/cloud-cli/core"
 	"github.com/spf13/cobra"
 )
 
 var loginCmd = &cobra.Command{
 	Use:   "login [driver]",
-	Short: "登录网盘账号",
-	Long: `登录网盘并保存认证信息。
-示例:
-  cloud-cli login quark --cookie "your_cookie_here"
-  cloud-cli login quark --env KUAKE_COOKIE`,
-	Args: cobra.ExactArgs(1),
+	Short: "Login to cloud drive",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		driverName = args[0]
-
-		cookie, _ := cmd.Flags().GetString("cookie")
-		envVar, _ := cmd.Flags().GetString("env")
+		driverName := args[0]
 		
-		if envVar != "" {
-			cookie = os.Getenv(envVar)
-			if cookie == "" {
-				return fmt.Errorf("environment variable %s is not set", envVar)
-			}
-		}
-
-		if cookie == "" {
-			return fmt.Errorf("please provide --cookie or --env flag")
-		}
-
-		_, err := core.NewDriver(driverName)
+		cookie, err := cmd.Flags().GetString("cookie")
 		if err != nil {
 			return err
 		}
-
-		tokens := map[string]string{
-			"cookie": cookie,
+		
+		if cookie == "" {
+			fmt.Print("Enter Cookie: ")
+			fmt.Scanln(&cookie)
 		}
-
-		if err := core.SetDriverTokens(driverName, tokens); err != nil {
+		
+		cfg := core.Config{
+			CurrentDriver: driverName,
+			Drivers: map[string]*core.DriverConfig{
+				driverName: {
+					Type: driverName,
+					Tokens: map[string]string{
+						"cookie": cookie,
+					},
+				},
+			},
+		}
+		
+		configPath := filepath.Join(os.Getenv("HOME"), ".config", "cloud-cli", "config.json")
+		if err := core.SaveConfig(configPath, &cfg); err != nil {
 			return err
 		}
-
-		fmt.Printf("✅ %s 登录成功，配置已保存至 %s\n", driverName, cfgFile)
+		
+		fmt.Printf("Logged in to %s successfully.\n", driverName)
 		return nil
 	},
 }
 
 func init() {
-	loginCmd.Flags().String("cookie", "", "网盘 Cookie 值")
-	loginCmd.Flags().String("env", "", "从环境变量读取 Cookie (如: KUAKE_COOKIE)")
+	loginCmd.Flags().StringP("cookie", "c", "", "Cookie string")
 	rootCmd.AddCommand(loginCmd)
 }

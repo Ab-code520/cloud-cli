@@ -1,47 +1,73 @@
 package core
 
-import "time"
+import (
+	"context"
+	"io"
+	"time"
+)
 
 // Object represents a unified file/directory object across all cloud providers.
 type Object struct {
-	ID      string      `json:"id"`
-	Name    string      `json:"name"`
-	Size    int64       `json:"size"`
-	IsDir   bool        `json:"is_dir"`
-	ModTime time.Time   `json:"mod_time"`
-	Path    string      `json:"path"`
+	ID      string    `json:"id"`
+	Name    string    `json:"name"`
+	Size    int64     `json:"size"`
+	IsDir   bool      `json:"is_dir"`
+	ModTime time.Time `json:"mod_time"`
+	Path    string    `json:"path"`
+	Hash    string    `json:"hash,omitempty"`
 	RawData interface{} `json:"-"`
+}
+
+// UploadPartInfo stores info about a single uploaded chunk.
+type UploadPartInfo struct {
+	PartNumber int    `json:"part_number"`
+	ETag       string `json:"etag"`
+	Size       int64  `json:"size"`
+}
+
+// UploadState represents the resumable upload checkpoint.
+type UploadState struct {
+	FilePath      string           `json:"file_path"`
+	DestPath      string           `json:"dest_path"`
+	TotalSize     int64            `json:"total_size"`
+	PartSize      int64            `json:"part_size"`
+	UploadedParts []UploadPartInfo `json:"uploaded_parts"`
+	UploadID      string           `json:"upload_id"`
+	CreatedAt     time.Time        `json:"created_at"`
 }
 
 // Storage is the interface that all backend drivers must implement.
 type Storage interface {
-	// Init initializes the driver with configuration (tokens, cookies, etc.)
+	// Name returns the driver name.
+	Name() string
+
+	// Init initializes the driver with configuration.
 	Init(cfg map[string]string) error
 
-	// List returns objects in a directory
-	List(pathOrID string) ([]*Object, error)
+	// User returns account information.
+	User(ctx context.Context) (map[string]interface{}, error)
 
-	// Download downloads an object to local path
-	Download(obj *Object, localPath string, concurrency int) error
+	// List returns objects in a directory.
+	List(ctx context.Context, pathOrID string) ([]*Object, error)
 
-	// Upload uploads a local file to remote directory
-	Upload(localPath string, remoteDir *Object, concurrency int) error
+	// Open opens a remote file for reading (supports Range requests for resuming).
+	Open(ctx context.Context, obj *Object, offset int64) (io.ReadCloser, error)
 
-	// Delete removes an object
-	Delete(obj *Object) error
+	// Put uploads data to a remote directory (supports streaming via io.Reader).
+	Put(ctx context.Context, in io.Reader, remoteDir *Object, name string, size int64) (*Object, error)
 
-	// Move moves an object to a new location
-	Move(src, dest *Object) error
+	// Delete removes an object.
+	Delete(ctx context.Context, obj *Object) error
 
-	// Rename renames an object
-	Rename(obj *Object, newName string) error
+	// Move moves an object.
+	Move(ctx context.Context, src *Object, destDir *Object) error
 
-	// Mkdir creates a directory
-	Mkdir(path string) error
+	// Rename renames an object.
+	Rename(ctx context.Context, obj *Object, newName string) error
 
-	// User returns account information
-	User() (map[string]interface{}, error)
+	// Mkdir creates a directory.
+	Mkdir(ctx context.Context, pathOrID string) (*Object, error)
 
-	// Name returns the driver name
-	Name() string
+	// Close releases any resources held by the driver.
+	Close() error
 }

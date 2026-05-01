@@ -1,400 +1,281 @@
 package quark
 
 import (
-	"crypto/md5"
-	"crypto/sha1"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
+	"sort"
+	"sync"
 	"time"
 
-	"cloud-cli/core"
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/Ab-code520/cloud-cli/utils"
 )
 
-func init() {
-	core.Register("quark", NewDriver)
-	core.RegisterInfo("quark", core.DriverInfo{
-		Name:        "quark",
-		Description: "Quark Cloud Drive (夸克网盘)",
-		Author:      "cloud-cli",
-	})
-}
-
-type QuarkDriver struct {
-	api *QuarkAPI
-	cfg map[string]string
+type Driver struct {
+	api   *QuarkAPI
+	cache string
 }
 
 func NewDriver() core.Storage {
-	return &QuarkDriver{}
+	return &Driver{
+		cache: filepath.Join(os.Getenv("HOME"), ".cache", "cloud-cli", "upload_states"),
+	}
 }
 
-func (d *QuarkDriver) Init(cfg map[string]string) error {
-	cookie, ok := cfg["cookie"]
-	if !ok || cookie == "" {
-		return fmt.Errorf("quark cookie is required")
+func (d *Driver) Name() string { return "quark" }
+
+func (d *Driver) Init(cfg map[string]string) error {
+	cookie := cfg["cookie"]
+	if cookie == "" {
+		return fmt.Errorf("cookie is required")
 	}
-	d.cfg = cfg
 	d.api = NewAPI(cookie)
+	if err := os.MkdirAll(d.cache, 0755); err != nil {
+		return fmt.Errorf("create cache dir: %w", err)
+	}
 	return nil
 }
 
-func (d *QuarkDriver) List(pathOrID string) ([]*core.Object, error) {
-	fid := pathOrID
-	if !strings.HasPrefix(pathOrID, "fid:") {
-		var err error
-		fid, err = d.resolvePath(pathOrID)
-		if err != nil {
-			return nil, fmt.Errorf("resolve path %s: %w", pathOrID, err)
-		}
+func (d *Driver) Close() error { return nil }
+
+func (d *Driver) List(ctx context.Context, pathOrID string) ([]*core.Object, error) {
+	req := ListReq{
+		PdirFid: pathOrID,
+		Page:    1,
+		Size:    100,
+		Sort:    "file_type",
+		Order:   "asc",
+	}
+	if pathOrID == "" {
+		req.PdirFid = "0"
 	}
 
-	resp, err := d.api.ListDir(fid, 1, 200)
+	resp, err := d.api.List(ctx, &req)
 	if err != nil {
 		return nil, err
 	}
 
-	data, ok := resp["data"].(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("invalid response data")
+	objects := make([]*core.Object, 0, len(resp.List))
+	for _, item := range resp.List {
+		objects = append(objects, &core.Object{
+			ID:      item.Fid,
+			Name:    item.FileName,
+			Size:    item.Size,
+			IsDir:   item.IsDir,
+			ModTime: time.Unix(item.UpdatedAt, 0),
+			Path:    item.Fid,
+		})
 	}
-
-	listData, ok := data["list"].([]interface{})
-	if !ok {
-		return []*core.Object{}, nil
-	}
-
-	var objects []*core.Object
-	for _, item := range listData {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		obj := &core.Object{RawData: m}
-		if fid, ok := m["fid"].(string); ok {
-			obj.ID = fid
-		}
-		if name, ok := m["file_name"].(string); ok {
-			obj.Name = name
-		}
-		if size, ok := m["size"].(float64); ok {
-			obj.Size = int64(size)
-		}
-		if ftype, ok := m["file_type"].(float64); ok {
-			obj.IsDir = int(ftype) == 0
-		}
-		if updatedAt, ok := m["updated_at"].(float64); ok {
-			obj.ModTime = time.Unix(int64(updatedAt/1000), 0)
-		} else if createdAt, ok := m["created_at"].(float64); ok {
-			obj.ModTime = time.Unix(int64(createdAt/1000), 0)
-		}
-		if path, ok := m["pdir_fid"].(string); ok {
-			obj.Path = path
-		}
-		objects = append(objects, obj)
-	}
-
 	return objects, nil
 }
 
-func (d *QuarkDriver) resolvePath(path string) (string, error) {
-	path = strings.TrimPrefix(path, "/")
-	if path == "" || path == "/" {
-		return "0", nil
+func (d *Driver) Open(ctx context.Context, obj *core.Object, offset int64) (io.ReadCloser, error) {
+	url, err := d.api.GetDownloadURL(ctx, obj.ID)
+	if err != nil {
+		return nil, err
 	}
 
-	parts := strings.Split(path, "/")
-	currentFid := "0"
-
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		resp, err := d.api.ListDir(currentFid, 1, 200)
-		if err != nil {
-			return "", err
-		}
-
-		data, _ := resp["data"].(map[string]interface{})
-		listData, _ := data["list"].([]interface{})
-
-		found := false
-		for _, item := range listData {
-			m, _ := item.(map[string]interface{})
-			name, _ := m["file_name"].(string)
-			if name == part {
-				currentFid, _ = m["fid"].(string)
-				found = true
-				break
-			}
-		}
-		if !found {
-			return "", fmt.Errorf("path component '%s' not found", part)
-		}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
 	}
 
-	return currentFid, nil
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+
+	resp, err := d.api.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("download request failed: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download failed with status %d", resp.StatusCode)
+	}
+
+	return resp.Body, nil
 }
 
-func (d *QuarkDriver) Download(obj *core.Object, localPath string, concurrency int) error {
-	if obj.IsDir {
-		return fmt.Errorf("cannot download directory")
-	}
+func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, name string, size int64) (*core.Object, error) {
+	var fileSHA1 string
+	var seekableFile *os.File
 
-	resp, err := d.api.GetDownloadURL(obj.ID)
-	if err != nil {
-		return err
-	}
-
-	downloadURL, _ := resp["download_url"].(string)
-	if downloadURL == "" {
-		return fmt.Errorf("no download URL returned")
-	}
-
-	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
-		return err
-	}
-
-	// 下载需要正确的 headers 和 Cookie
-	req, err := http.NewRequest("GET", downloadURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
-	req.Header.Set("Referer", "https://pan.quark.cn/")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="146", "Google Chrome";v="146", "Not_A Brand";v="24"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
-	req.Header.Set("Sec-Fetch-Site", "same-site")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Dest", "iframe")
-	req.Header.Set("Cookie", d.api.cookie)
-
-	httpResp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer httpResp.Body.Close()
-
-	if httpResp.StatusCode >= 400 {
-		return fmt.Errorf("download failed: status %d", httpResp.StatusCode)
-	}
-
-	outFile, err := os.Create(localPath)
-	if err != nil {
-		return err
-	}
-	defer outFile.Close()
-
-	_, err = io.Copy(outFile, httpResp.Body)
-	return err
-}
-
-func (d *QuarkDriver) Upload(localPath string, remoteDir *core.Object, concurrency int) error {
-	fileInfo, err := os.Stat(localPath)
-	if err != nil {
-		return err
-	}
-	if fileInfo.IsDir() {
-		return fmt.Errorf("directory upload not yet supported")
-	}
-
-	fileName := fileInfo.Name()
-	fileSize := fileInfo.Size()
-
-	// Calculate MD5 and SHA1
-	f, err := os.Open(localPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	md5Hash := md5.New()
-	sha1Hash := sha1.New()
-	multiWriter := io.MultiWriter(md5Hash, sha1Hash)
-
-	if _, err := io.Copy(multiWriter, f); err != nil {
-		return fmt.Errorf("calculate hash: %w", err)
-	}
-
-	md5Str := fmt.Sprintf("%x", md5Hash.Sum(nil))
-	sha1Str := fmt.Sprintf("%x", sha1Hash.Sum(nil))
-
-	// Get MIME type
-	mimeType := mime.TypeByExtension(filepath.Ext(fileName))
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
-	}
-
-	// Get target directory fid
-	targetFid := remoteDir.ID
-	if targetFid == "" {
-		targetFid, err = d.resolvePath(remoteDir.Path)
+	if f, ok := in.(*os.File); ok {
+		_, err := f.Seek(0, io.SeekStart)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("cannot seek file: %w", err)
 		}
+		sha1, err := utils.CalcReaderSHA1(in)
+		if err != nil {
+			return nil, fmt.Errorf("calc sha1: %w", err)
+		}
+		fileSHA1 = sha1
+		_, err = f.Seek(0, io.SeekStart)
+		if err != nil {
+			return nil, fmt.Errorf("cannot rewind file: %w", err)
+		}
+		seekableFile = f
 	}
 
-	// Pre-upload
-	fmt.Printf("[quark] 预检上传: %s (%s)\n", fileName, formatSize(fileSize))
-	preResp, err := d.api.UploadPrepare(fileName, fileSize, targetFid, md5Str, sha1Str, mimeType)
+	partSize := int64(10 * 1024 * 1024)
+	preResp, err := d.api.Precreate(ctx, &PrecreateReq{
+		PdirFid:   remoteDir.ID,
+		FileName:  name,
+		Size:      size,
+		Sha1:      fileSHA1,
+		ChunkSize: partSize,
+	})
 	if err != nil {
-		return fmt.Errorf("upload prepare: %w", err)
+		return nil, fmt.Errorf("precreate failed: %w", err)
 	}
 
-	// Check 秒传
-	if preResp.Data.Finish {
-		fmt.Printf("[quark] ✅ 秒传成功: %s\n", fileName)
-		return nil
+	if preResp.RapidUpload {
+		return &core.Object{
+			ID:   preResp.FileID,
+			Name: name,
+			Size: size,
+		}, nil
 	}
 
-	// Upload parts
-	fmt.Printf("[quark] 开始分片上传 (part_size=%s)...\n", formatSize(preResp.Metadata.PartSize))
-
-	f.Seek(0, io.SeekStart)
-	partSize := preResp.Metadata.PartSize
+	uploadID := preResp.UploadID
+	partSize = preResp.PartSize
 	if partSize <= 0 {
-		partSize = 4 * 1024 * 1024 // 4MB default
+		partSize = 10 * 1024 * 1024
+	}
+	totalParts := int((size + partSize - 1) / partSize)
+
+	statePath := d.getStatePath(name, size, uploadID)
+	state := d.loadState(statePath)
+	if state == nil {
+		state = &core.UploadState{
+			UploadID:      uploadID,
+			TotalSize:     size,
+			PartSize:      partSize,
+			UploadedParts: []core.UploadPartInfo{},
+		}
 	}
 
-	var etags []string
-	partNum := 1
+	auth, err := d.api.GetUploadAuth(ctx, uploadID)
+	if err != nil {
+		return nil, fmt.Errorf("get auth: %w", err)
+	}
 
-	for {
-		chunk := make([]byte, partSize)
-		n, err := f.Read(chunk)
-		if n == 0 {
+	pool := utils.NewPool(4)
+	var mu sync.Mutex
+
+	uploadedSet := make(map[int]string)
+	for _, p := range state.UploadedParts {
+		uploadedSet[p.PartNumber] = p.ETag
+	}
+
+	for pn := 1; pn <= totalParts; pn++ {
+		if ctx.Err() != nil {
 			break
 		}
-		if err != nil && err != io.EOF {
-			return fmt.Errorf("read chunk: %w", err)
-		}
-
-		// Get auth key for this part
-		now := time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT")
-		authMeta := fmt.Sprintf("PUT\n\n%s\n%s\n", mimeType, now)
-		authMeta += fmt.Sprintf("x-oss-date:%s\nx-oss-user-agent:aliyun-sdk-js/1.0.0 Chrome 145.0.0.0 on Windows 10 64-bit\n/%s/%s?partNumber=%d&uploadId=%s",
-			now, preResp.Data.Bucket, preResp.Data.ObjKey, partNum, preResp.Data.UploadID)
-
-		authKey, err := d.api.GetAuthKey(preResp.Data.AuthInfo, authMeta, preResp.Data.TaskID)
-		if err != nil {
-			return fmt.Errorf("get auth key for part %d: %w", partNum, err)
-		}
-
-		fmt.Printf("\r[quark] 上传分片 %d...", partNum)
-
-		etag, err := d.api.UploadPart(preResp, mimeType, partNum, chunk[:n], authKey)
-		if err != nil {
-			return fmt.Errorf("upload part %d: %w", partNum, err)
-		}
-
-		etags = append(etags, etag)
-		partNum++
-
-		if err == io.EOF {
-			break
-		}
-	}
-	fmt.Println()
-
-	// Commit upload
-	fmt.Printf("[quark] 提交上传 (%d 个分片)...\n", len(etags))
-	if err := d.api.CommitUpload(preResp, etags); err != nil {
-		return fmt.Errorf("commit upload: %w", err)
-	}
-
-	fmt.Printf("[quark] ✅ 上传完成: %s (%s)\n", fileName, formatSize(fileSize))
-	return nil
-}
-
-func (d *QuarkDriver) Delete(obj *core.Object) error {
-	_, err := d.api.DeleteFile([]string{obj.ID})
-	return err
-}
-
-func (d *QuarkDriver) Move(src, dest *core.Object) error {
-	toFid := dest.ID
-	if toFid == "" {
-		var err error
-		toFid, err = d.resolvePath(dest.Path)
-		if err != nil {
-			return err
-		}
-	}
-	_, err := d.api.MoveFile([]string{src.ID}, toFid)
-	return err
-}
-
-func (d *QuarkDriver) Rename(obj *core.Object, newName string) error {
-	_, err := d.api.RenameFile(obj.ID, newName)
-	return err
-}
-
-func (d *QuarkDriver) Mkdir(path string) error {
-	path = strings.TrimPrefix(path, "/")
-	parts := strings.Split(path, "/")
-	currentFid := "0"
-
-	for _, part := range parts {
-		if part == "" {
+		if _, ok := uploadedSet[pn]; ok {
 			continue
 		}
-		// Check if already exists
-		resp, err := d.api.ListDir(currentFid, 1, 200)
-		if err != nil {
-			return err
-		}
-		data, _ := resp["data"].(map[string]interface{})
-		listData, _ := data["list"].([]interface{})
 
-		exists := false
-		for _, item := range listData {
-			m, _ := item.(map[string]interface{})
-			name, _ := m["file_name"].(string)
-			ftype, _ := m["file_type"].(float64)
-			if name == part && int(ftype) == 0 {
-				currentFid, _ = m["fid"].(string)
-				exists = true
-				break
+		partNum := pn
+		pool.Go(func(ctx context.Context) error {
+			offset := int64(partNum-1) * partSize
+			remSize := partSize
+			if offset+remSize > size {
+				remSize = size - offset
 			}
-		}
 
-		if !exists {
-			createResp, err := d.api.CreateDir(currentFid, part)
+			buf := make([]byte, remSize)
+			if seekableFile != nil {
+				_, err := seekableFile.ReadAt(buf, offset)
+				if err != nil && err != io.EOF {
+					return fmt.Errorf("read part %d: %w", partNum, err)
+				}
+			} else {
+				return fmt.Errorf("concurrent upload requires seekable input")
+			}
+
+			etag, err := d.api.UploadPart(ctx, auth.Endpoint, buf, partNum, uploadID)
 			if err != nil {
 				return err
 			}
-			cdata, _ := createResp["data"].(map[string]interface{})
-			if cdata == nil {
-				return fmt.Errorf("create dir failed: %v", createResp["message"])
-			}
-			currentFid, _ = cdata["fid"].(string)
-		}
+
+			mu.Lock()
+			uploadedSet[partNum] = etag
+			state.UploadedParts = append(state.UploadedParts, core.UploadPartInfo{
+				PartNumber: partNum,
+				ETag:       etag,
+			})
+			d.saveState(statePath, state)
+			mu.Unlock()
+
+			return nil
+		})
 	}
 
+	if err := pool.Wait(); err != nil {
+		return nil, fmt.Errorf("upload failed: %w", err)
+	}
+
+	finishReq := FinishReq{UploadID: uploadID}
+	sort.Slice(state.UploadedParts, func(i, j int) bool {
+		return state.UploadedParts[i].PartNumber < state.UploadedParts[j].PartNumber
+	})
+
+	for _, p := range state.UploadedParts {
+		finishReq.Parts = append(finishReq.Parts, struct{
+			PartNumber int    `json:"part_number"`
+			ETag       string `json:"etag"`
+		}{p.PartNumber, p.ETag})
+	}
+
+	if err := d.api.FinishUpload(ctx, &finishReq); err != nil {
+		return nil, fmt.Errorf("finish upload: %w", err)
+	}
+
+	os.Remove(statePath)
+
+	return &core.Object{
+		Name: name,
+		Size: size,
+	}, nil
+}
+
+func (d *Driver) User(ctx context.Context) (map[string]interface{}, error) { return nil, nil }
+func (d *Driver) Delete(ctx context.Context, obj *core.Object) error      { return nil }
+func (d *Driver) Move(ctx context.Context, src *core.Object, destDir *core.Object) error {
 	return nil
 }
+func (d *Driver) Rename(ctx context.Context, obj *core.Object, newName string) error { return nil }
+func (d *Driver) Mkdir(ctx context.Context, pathOrID string) (*core.Object, error)   { return nil, nil }
 
-func (d *QuarkDriver) User() (map[string]interface{}, error) {
-	return d.api.User()
+func (d *Driver) getStatePath(name string, size int64, uploadID string) string {
+	key := fmt.Sprintf("%s_%d_%s", name, size, uploadID)
+	hash := fmt.Sprintf("%x", []byte(key))
+	return filepath.Join(d.cache, hash+".json")
 }
 
-func formatSize(bytes int64) string {
-	switch {
-	case bytes >= 1024*1024*1024:
-		return fmt.Sprintf("%.2f GB", float64(bytes)/1024/1024/1024)
-	case bytes >= 1024*1024:
-		return fmt.Sprintf("%.2f MB", float64(bytes)/1024/1024)
-	case bytes >= 1024:
-		return fmt.Sprintf("%.2f KB", float64(bytes)/1024)
-	default:
-		return fmt.Sprintf("%d B", bytes)
+func (d *Driver) saveState(path string, state *core.UploadState) error {
+	data, _ := json.Marshal(state)
+	return os.WriteFile(path, data, 0644)
+}
+
+func (d *Driver) loadState(path string) *core.UploadState {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
 	}
+	var s core.UploadState
+	if json.Unmarshal(data, &s) != nil {
+		return nil
+	}
+	return &s
 }

@@ -1,4 +1,4 @@
-module cloud-cli
+module github.com/Ab-code520/cloud-cli
 
 go 1.21
 

@@ -3,67 +3,58 @@ package utils
 import (
 	"context"
 	"sync"
-	"time"
 )
 
-// TokenBucket 令牌桶限流器
-type TokenBucket struct {
-	tokens   chan struct{}
-	interval time.Duration
+// Pool manages a pool of concurrent workers with context cancellation.
+type Pool struct {
+	sem    chan struct{}
+	wg     sync.WaitGroup
+	mu     sync.Mutex
+	err    error
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-// NewTokenBucket 创建令牌桶
-func NewTokenBucket(maxConcurrent int, interval time.Duration) *TokenBucket {
-	return &TokenBucket{
-		tokens:   make(chan struct{}, maxConcurrent),
-		interval: interval,
+// NewPool creates a new worker pool.
+func NewPool(concurrency int) *Pool {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Pool{
+		sem:    make(chan struct{}, concurrency),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 }
 
-// Acquire 获取令牌
-func (tb *TokenBucket) Acquire(ctx context.Context) error {
-	select {
-	case tb.tokens <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
+// Go runs the function in the worker pool.
+func (p *Pool) Go(fn func(ctx context.Context) error) {
+	p.wg.Add(1)
+	p.sem <- struct{}{} // Acquire semaphore
 
-// Release 释放令牌
-func (tb *TokenBucket) Release() {
-	select {
-	case <-tb.tokens:
-	default:
-	}
-}
-
-// WorkerPool 协程池
-type WorkerPool struct {
-	sem     chan struct{}
-	wg      sync.WaitGroup
-	results []chan interface{}
-}
-
-// NewWorkerPool 创建协程池
-func NewWorkerPool(maxWorkers int) *WorkerPool {
-	return &WorkerPool{
-		sem: make(chan struct{}, maxWorkers),
-	}
-}
-
-// Go 提交任务到池中
-func (wp *WorkerPool) Go(fn func()) {
-	wp.wg.Add(1)
-	wp.sem <- struct{}{}
 	go func() {
-		defer wp.wg.Done()
-		defer func() { <-wp.sem }()
-		fn()
+		defer p.wg.Done()
+		defer func() { <-p.sem }() // Release semaphore
+
+		if p.ctx.Err() != nil {
+			return
+		}
+
+		if err := fn(p.ctx); err != nil {
+			p.mu.Lock()
+			if p.err == nil {
+				p.err = err
+				p.cancel() // Cancel pool to stop other tasks
+			}
+			p.mu.Unlock()
+		}
 	}()
 }
 
-// Wait 等待所有任务完成
-func (wp *WorkerPool) Wait() {
-	wp.wg.Wait()
+// Wait blocks until all workers complete.
+func (p *Pool) Wait() error {
+	p.wg.Wait()
+	p.cancel() // Ensure cleanup
+	return p.err
 }

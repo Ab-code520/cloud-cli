@@ -2,144 +2,118 @@ package utils
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
 )
 
-// ProgressBar 终端进度条
-type ProgressBar struct {
-	total    int64
-	current  int64
-	start    time.Time
-	barWidth int
-	unit     string
-	mu       sync.Mutex
-	enabled  bool
-}
+const (
+	KB = 1024
+	MB = 1024 * KB
+	GB = 1024 * MB
+)
 
-// NewProgressBar 创建进度条
-func NewProgressBar(total int64, unit string, enabled bool) *ProgressBar {
-	return &ProgressBar{
-		total:    total,
-		barWidth: 40,
-		unit:     unit,
-		start:    time.Now(),
-		enabled:  enabled && isTerminal(),
-	}
-}
-
-func isTerminal() bool {
-	info, err := os.Stdout.Stat()
-	if err != nil {
-		return false
-	}
-	return (info.Mode() & os.ModeCharDevice) != 0
-}
-
-// Update 更新进度
-func (pb *ProgressBar) Update(current int64) {
-	if !pb.enabled {
-		return
-	}
-	pb.mu.Lock()
-	defer pb.mu.Unlock()
-	pb.current = current
-	pb.render()
-}
-
-// Add 增加进度
-func (pb *ProgressBar) Add(delta int64) {
-	if !pb.enabled {
-		return
-	}
-	pb.mu.Lock()
-	defer pb.mu.Unlock()
-	pb.current += delta
-	pb.render()
-}
-
-func (pb *ProgressBar) render() {
-	if pb.total <= 0 {
-		return
-	}
-
-	percent := float64(pb.current) / float64(pb.total)
-	if percent > 1.0 {
-		percent = 1.0
-	}
-
-	filled := int(percent * float64(pb.barWidth))
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", pb.barWidth-filled)
-
-	elapsed := time.Since(pb.start)
-	speed := float64(pb.current) / elapsed.Seconds()
-
-	var speedStr string
-	switch {
-	case speed > 1024*1024*1024:
-		speedStr = fmt.Sprintf("%.2f GB/s", speed/1024/1024/1024)
-	case speed > 1024*1024:
-		speedStr = fmt.Sprintf("%.2f MB/s", speed/1024/1024)
-	case speed > 1024:
-		speedStr = fmt.Sprintf("%.2f KB/s", speed/1024)
-	default:
-		speedStr = fmt.Sprintf("%.0f B/s", speed)
-	}
-
-	remaining := time.Duration(float64(pb.total-pb.current) / speed * float64(time.Second))
-	if remaining < 0 {
-		remaining = 0
-	}
-
-	fmt.Printf("[%s] %5.1f%% | %s | 剩余: %s",
-		bar,
-		percent*100,
-		speedStr,
-		remaining.Truncate(time.Second))
-
-	if percent >= 1.0 {
-		fmt.Println()
-	}
-}
-
-// Done 标记完成
-func (pb *ProgressBar) Done() {
-	if !pb.enabled {
-		return
-	}
-	pb.mu.Lock()
-	defer pb.mu.Unlock()
-	pb.current = pb.total
-	pb.render()
-}
-
-// FormatSize 格式化文件大小
 func FormatSize(bytes int64) string {
 	switch {
-	case bytes >= 1024*1024*1024:
-		return fmt.Sprintf("%.2f GB", float64(bytes)/1024/1024/1024)
-	case bytes >= 1024*1024:
-		return fmt.Sprintf("%.2f MB", float64(bytes)/1024/1024)
-	case bytes >= 1024:
-		return fmt.Sprintf("%.2f KB", float64(bytes)/1024)
+	case bytes >= GB:
+		return fmt.Sprintf("%.2f GB", float64(bytes)/GB)
+	case bytes >= MB:
+		return fmt.Sprintf("%.2f MB", float64(bytes)/MB)
+	case bytes >= KB:
+		return fmt.Sprintf("%.2f KB", float64(bytes)/KB)
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
 }
 
-// FormatDuration 格式化时间
+func FormatSpeed(bytesPerSec float64) string {
+	switch {
+	case bytesPerSec >= GB:
+		return fmt.Sprintf("%.2f GB/s", bytesPerSec/GB)
+	case bytesPerSec >= MB:
+		return fmt.Sprintf("%.2f MB/s", bytesPerSec/MB)
+	case bytesPerSec >= KB:
+		return fmt.Sprintf("%.2f KB/s", bytesPerSec/KB)
+	default:
+		return fmt.Sprintf("%.0f B/s", bytesPerSec)
+	}
+}
+
 func FormatDuration(d time.Duration) string {
-	d = d.Truncate(time.Second)
+	if d < 0 {
+		return "0s"
+	}
 	h := int(d.Hours())
 	m := int(d.Minutes()) % 60
 	s := int(d.Seconds()) % 60
 	if h > 0 {
 		return fmt.Sprintf("%dh%dm%ds", h, m, s)
-	}
-	if m > 0 {
+	} else if m > 0 {
 		return fmt.Sprintf("%dm%ds", m, s)
 	}
 	return fmt.Sprintf("%ds", s)
+}
+
+type ProgressBar struct {
+	mu          sync.Mutex
+	total       int64
+	current     int64
+	startTime   time.Time
+	lastUpdate  time.Time
+	lastCurrent int64
+	speed       float64
+	width       int
+}
+
+func NewProgressBar(total int64, width int) *ProgressBar {
+	return &ProgressBar{
+		total:     total,
+		width:     width,
+		startTime: time.Now(),
+		lastUpdate: time.Now(),
+	}
+}
+
+func (pb *ProgressBar) Update(current int64) {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	pb.current = current
+	now := time.Now()
+	elapsed := now.Sub(pb.startTime).Seconds()
+
+	if elapsed > 0 {
+		deltaT := now.Sub(pb.lastUpdate).Seconds()
+		if deltaT > 0 {
+			pb.speed = float64(current-pb.lastCurrent) / deltaT
+		} else {
+			pb.speed = float64(current) / elapsed
+		}
+	}
+
+	pb.lastUpdate = now
+	pb.lastCurrent = current
+}
+
+func (pb *ProgressBar) Render() string {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	percent := float64(pb.current) / float64(pb.total) * 100
+	if percent > 100 {
+		percent = 100
+	}
+
+	filled := int(float64(pb.width) * percent / 100)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", pb.width-filled)
+
+	remaining := time.Duration(float64(pb.total-pb.current)/pb.speed) * time.Second
+
+	return fmt.Sprintf(" %s %6.1f%% %s/s [%s/%s] ETA:%s",
+		bar, percent,
+		FormatSpeed(pb.speed),
+		FormatSize(pb.current),
+		FormatSize(pb.total),
+		FormatDuration(remaining),
+	)
 }
