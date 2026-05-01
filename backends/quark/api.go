@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -58,7 +59,9 @@ func (a *QuarkAPI) request(ctx context.Context, method, path string, payload int
 		return fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	if method != http.MethodGet && method != http.MethodHead {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("Cookie", a.cookie)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -97,38 +100,43 @@ func (a *QuarkAPI) request(ctx context.Context, method, path string, payload int
 }
 
 type PrecreateReq struct {
-	PdirFid   string `json:"pdir_fid"`
-	FileName  string `json:"file_name"`
-	Size      int64  `json:"size"`
-	Sha1      string `json:"sha1"`
-	ChunkSize int64  `json:"chunk_size"`
+	PdirFid    string `json:"pdir_fid"`
+	FileName   string `json:"file_name"`
+	Size       int64  `json:"size"`
+	Sha1       string `json:"sha1"`
+	Md5        string `json:"md5"`
+	ChunkSize  int64  `json:"chunk_size"`
+	FormatType string `json:"format_type"`
 }
 
 type PrecreateResp struct {
-	UploadID    string `json:"upload_id"`
-	RapidUpload bool   `json:"rapid_upload"`
-	PartSize    int64  `json:"part_size"`
-	FileID      string `json:"fid"`
+	UploadID    string          `json:"upload_id"`
+	TaskID      string          `json:"task_id"`
+	RapidUpload bool            `json:"rapid_upload"`
+	PartSize    int64           `json:"part_size"`
+	FileID      string          `json:"fid"`
+	AuthMeta    json.RawMessage `json:"auth_meta"`
 }
 
 func (a *QuarkAPI) Precreate(ctx context.Context, req *PrecreateReq) (*PrecreateResp, error) {
 	var resp PrecreateResp
-	err := a.request(ctx, http.MethodPost, apiPrecreate, req, &resp)
+	err := a.request(ctx, http.MethodPost, apiPrecreate+"?pr=ucpro&fr=pc", req, &resp)
 	return &resp, err
 }
 
 type AuthReq struct {
-	UploadID string `json:"upload_id"`
+	TaskID    string          `json:"task_id"`
+	UploadID  string          `json:"upload_id"`
+	AuthMeta  json.RawMessage `json:"auth_meta"`
 }
 
 type AuthResp struct {
 	Endpoint string `json:"endpoint"`
 }
 
-func (a *QuarkAPI) GetUploadAuth(ctx context.Context, uploadID string) (*AuthResp, error) {
-	req := AuthReq{UploadID: uploadID}
+func (a *QuarkAPI) Auth(ctx context.Context, req *AuthReq) (*AuthResp, error) {
 	var resp AuthResp
-	err := a.request(ctx, http.MethodPost, apiAuth, req, &resp)
+	err := a.request(ctx, http.MethodPost, apiAuth+"?pr=ucpro&fr=pc", req, &resp)
 	return &resp, err
 }
 
@@ -136,7 +144,6 @@ func (a *QuarkAPI) UploadPart(ctx context.Context, ossURL string, data []byte, p
 	if safe, reason := utils.IsURLSafe(ossURL); !safe {
 		return "", fmt.Errorf("ssrf blocked: %s", reason)
 	}
-
 	finalURL := fmt.Sprintf("%s?partNumber=%d&uploadId=%s", ossURL, partNumber, uploadID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, finalURL, bytes.NewReader(data))
 	if err != nil {
@@ -173,7 +180,7 @@ type FinishReq struct {
 }
 
 func (a *QuarkAPI) FinishUpload(ctx context.Context, req *FinishReq) error {
-	return a.request(ctx, http.MethodPost, apiFinish, req, nil)
+	return a.request(ctx, http.MethodPost, apiFinish+"?pr=ucpro&fr=pc", req, nil)
 }
 
 type ListReq struct {
@@ -198,8 +205,21 @@ type ListResp struct {
 }
 
 func (a *QuarkAPI) List(ctx context.Context, req *ListReq) (*ListResp, error) {
+	params := url.Values{}
+	params.Add("pdir_fid", req.PdirFid)
+	params.Add("_page", fmt.Sprintf("%d", req.Page))
+	params.Add("_size", fmt.Sprintf("%d", req.Size))
+	params.Add("_sort", req.Sort)
+	params.Add("_order", req.Order)
+	params.Add("pr", "ucpro")
+	params.Add("fr", "pc")
+	params.Add("_fetch_total", "1")
+	params.Add("_fetch_sub_dirs", "0")
+	params.Add("uc_param_str", "")
+
+	path := apiList + "?" + params.Encode()
 	var resp ListResp
-	err := a.request(ctx, http.MethodPost, apiList, req, &resp)
+	err := a.request(ctx, http.MethodGet, path, nil, &resp)
 	return &resp, err
 }
 
@@ -399,7 +419,7 @@ func (a *QuarkAPI) RenameFile(ctx context.Context, fid, newName string) error {
 // Quota / Space API
 // ═══════════════════════════════════════════
 
-const apiSpace = "/1/clouddrive/file/space"
+const apiSpace = "/1/clouddrive/capacity/information"
 
 type SpaceResp struct {
 	TotalCapacity int64  `json:"total_capacity"`
@@ -430,7 +450,7 @@ const apiMkdir = "/1/clouddrive/file"
 
 type MkdirReq struct {
 	PdirFid     string `json:"pdir_fid"`
-	DirName     string `json:"dir_name"`
+	FileName    string `json:"file_name"`
 	DirInitLock bool   `json:"dir_init_lock"`
 }
 
@@ -441,11 +461,11 @@ type MkdirResp struct {
 func (a *QuarkAPI) Mkdir(ctx context.Context, pdirFid, dirName string) (*MkdirResp, error) {
 	req := MkdirReq{
 		PdirFid:     pdirFid,
-		DirName:     dirName,
+		FileName:    dirName,
 		DirInitLock: false,
 	}
 	var resp MkdirResp
-	err := a.request(ctx, http.MethodPost, apiMkdir, req, &resp)
+	err := a.request(ctx, http.MethodPost, apiMkdir+"?pr=ucpro&fr=pc", req, &resp)
 	return &resp, err
 }
 
@@ -517,143 +537,4 @@ func (a *QuarkAPI) RecoverRecycle(ctx context.Context, fids []string) error {
 func (a *QuarkAPI) DeleteRecycle(ctx context.Context, fids []string) error {
 	req := map[string]interface{}{"fid_list": fids}
 	return a.request(ctx, http.MethodPost, apiRecycleDelete, req, nil)
-}
-
-// ═══════════════════════════════════════════
-// QR Login API
-// ═══════════════════════════════════════════
-
-const (
-	qrBaseURL    = "https://uop.quark.cn"
-	qrGenerate   = "/api/v1/auth/qrcode/generate"
-	qrQuery      = "/api/v1/auth/qrcode/query"
-	qrAuthorize  = "https://su.quark.cn/4_e3f80838a74530001d816a5628a6addd"
-)
-
-// QRTokenResp is the response from generating a QR code.
-type QRTokenResp struct {
-	Token string `json:"token"`
-	URL   string `json:"url"`
-}
-
-// GenerateQR creates a new QR login session and returns the token + login URL.
-func (a *QuarkAPI) GenerateQR(ctx context.Context) (*QRTokenResp, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, qrBaseURL+qrGenerate, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := a.client.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("generate QR failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	var baseResp struct {
-		Status  int             `json:"status"`
-		Code    int             `json:"code"`
-		Message string          `json:"message"`
-		Data    json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(respData, &baseResp); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
-	}
-	if baseResp.Status != 200 || baseResp.Code != 0 {
-		return nil, fmt.Errorf("api error %d: %s", baseResp.Code, baseResp.Message)
-	}
-
-	var qrResp QRTokenResp
-	if err := json.Unmarshal(baseResp.Data, &qrResp); err != nil {
-		return nil, fmt.Errorf("parse QR data: %w", err)
-	}
-	return &qrResp, nil
-}
-
-// QRStatus is the polling result for QR login status.
-type QRStatus string
-
-const (
-	QRNotScanned   QRStatus = "NOT_SCANNED"
-	QRScanned      QRStatus = "SCANNED"
-	QRConfirmed    QRStatus = "CONFIRMED"
-	QRExpired      QRStatus = "EXPIRED"
-	QRUnknownState QRStatus = "UNKNOWN"
-)
-
-// QRQueryResp is the response from polling QR status.
-type QRQueryResp struct {
-	Status      QRStatus `json:"status"`
-	Cookie      string   `json:"cookie"`
-	RedirectURL string   `json:"redirect_url"`
-	Message     string   `json:"message"`
-}
-
-// QueryQRStatus polls the QR login status.
-// Returns the status and optional cookie/redirect_url when confirmed.
-func (a *QuarkAPI) QueryQRStatus(ctx context.Context, token string) (*QRQueryResp, error) {
-	url := fmt.Sprintf("%s%s?token=%s", qrBaseURL, qrQuery, token)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := a.client.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("query QR status failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	var baseResp struct {
-		Status  int             `json:"status"`
-		Code    int             `json:"code"`
-		Message string          `json:"message"`
-		Data    json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(respData, &baseResp); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
-	}
-
-	var qrResult QRQueryResp
-
-	// Quark uses status 200001 for not scanned, 200003 for scanned, 200004 for confirmed/expired
-	switch baseResp.Code {
-	case 0:
-		// Parsed as confirmed, try to extract cookie from data
-		if baseResp.Data != nil {
-			json.Unmarshal(baseResp.Data, &qrResult)
-		}
-		qrResult.Status = QRConfirmed
-		return &qrResult, nil
-	case 200001:
-		qrResult.Status = QRNotScanned
-		return &qrResult, nil
-	case 200003:
-		qrResult.Status = QRScanned
-		return &qrResult, nil
-	case 200004:
-		qrResult.Status = QRExpired
-		return &qrResult, nil
-	default:
-		qrResult.Status = QRUnknownState
-		qrResult.Message = baseResp.Message
-		return &qrResult, nil
-	}
 }

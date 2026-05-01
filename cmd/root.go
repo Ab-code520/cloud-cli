@@ -41,23 +41,40 @@ func initDriver(name string, rootPath string) (core.Storage, error) {
 		}
 	} else {
 		// Load from config
-		// Try specific account name if provided, else default
-		// For simplicity, let's look for an account of this type
+		// Prefer account named "driverName-default" first, then "default", then any matching type.
+		targetAccName := name + "-default"
+		var fallbackAcc *core.Account
 		found := false
+		
 		for _, accName := range core.GlobalConfig.ListAccounts() {
 			acc, _ := core.GlobalConfig.GetAccount(accName)
-			if acc.Type == name {
+			if acc.Type != name {
+				continue
+			}
+			
+			fmt.Printf("DEBUG: Checking account '%s', type='%s', cookie_len=%d\n", accName, acc.Type, len(acc.Cookie["cookie"]))
+			
+			// Exact match for driver default
+			if accName == targetAccName {
 				initCfg = make(map[string]string)
-				for k, v := range acc.Cookie {
-					initCfg[k] = v
-				}
-				for k, v := range acc.Params {
-					initCfg[k] = v
-				}
+				for k, v := range acc.Cookie { initCfg[k] = v }
+				for k, v := range acc.Params { initCfg[k] = v }
 				found = true
 				break
 			}
+			// Keep as fallback
+			if fallbackAcc == nil {
+				fallbackAcc = acc
+			}
 		}
+
+		if !found && fallbackAcc != nil {
+			initCfg = make(map[string]string)
+			for k, v := range fallbackAcc.Cookie { initCfg[k] = v }
+			for k, v := range fallbackAcc.Params { initCfg[k] = v }
+			found = true
+		}
+
 		if !found {
 			return nil, fmt.Errorf("no account found for driver '%s'. Please login first.", name)
 		}

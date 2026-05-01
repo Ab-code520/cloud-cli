@@ -2,6 +2,7 @@ package quark
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,8 +50,14 @@ func (d *Driver) Init(cfg map[string]string) error {
 func (d *Driver) Close() error { return nil }
 
 func (d *Driver) List(ctx context.Context, pathOrID string) ([]*core.Object, error) {
+	// Clean up path: "quark:/" -> "/" -> "0"
+	if strings.Contains(pathOrID, ":/") {
+		parts := strings.SplitN(pathOrID, ":/", 2)
+		pathOrID = "/" + parts[1]
+	}
+	
 	pdirFid := pathOrID
-	if pdirFid == "" {
+	if pdirFid == "" || pdirFid == "/" {
 		pdirFid = "0"
 	}
 
@@ -126,46 +133,71 @@ func (d *Driver) Open(ctx context.Context, obj *core.Object, offset int64) (io.R
 
 func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, name string, size int64) (*core.Object, error) {
 	var fileSHA1 string
+	var fileMD5 string
 	var fileReader io.ReaderAt
 
 	// Fix #6: Support io.ReaderAt interface instead of strict *os.File
 	if ra, ok := in.(io.ReaderAt); ok {
 		fileReader = ra
-		// If it's a file, rewind and calc SHA1
+		// If it's a file, rewind and calc SHA1/MD5
 		if f, ok := in.(*os.File); ok {
 			_, err := f.Seek(0, io.SeekStart)
 			if err != nil {
 				return nil, fmt.Errorf("cannot seek file: %w", err)
 			}
+			// Calculate SHA1
 			sha1, err := utils.CalcReaderSHA1(in)
 			if err != nil {
 				return nil, fmt.Errorf("calc sha1: %w", err)
 			}
 			fileSHA1 = sha1
+
+			// Rewind and calculate MD5
 			_, err = f.Seek(0, io.SeekStart)
 			if err != nil {
-				return nil, fmt.Errorf("cannot rewind file: %w", err)
+				return nil, fmt.Errorf("cannot rewind file for MD5: %w", err)
+			}
+			md5, err := utils.CalcReaderMD5(in)
+			if err != nil {
+				return nil, fmt.Errorf("calc md5: %w", err)
+			}
+			fileMD5 = md5
+
+			// Rewind for upload
+			_, err = f.Seek(0, io.SeekStart)
+			if err != nil {
+				return nil, fmt.Errorf("cannot rewind file for upload: %w", err)
 			}
 		}
 	} else {
-		// If not ReaderAt, we can't do concurrent multipart. Fallback or Error.
-		// For cloud-cli, we usually pass a file, so this is rare.
 		return nil, fmt.Errorf("upload requires io.ReaderAt support for concurrent multipart")
 	}
 
-	// Fix #5: Dynamic Part Size
-	partSize := int64(10 * 1024 * 1024) // 10MB default
-	
+	// Dynamic part size: max(10MB, size/9000 + 1MB) to stay within 10000 part limit
+	partSize := int64(10 * 1024 * 1024)
+	if size > 0 {
+		calcSize := size/9000 + 1024*1024
+		if calcSize > partSize {
+			partSize = calcSize
+		}
+	}
+
 	preResp, err := d.api.Precreate(ctx, &PrecreateReq{
-		PdirFid:   remoteDir.ID,
-		FileName:  name,
-		Size:      size,
-		Sha1:      fileSHA1,
-		ChunkSize: partSize,
+		PdirFid:    remoteDir.ID,
+		FileName:   name,
+		Size:       size,
+		Sha1:       fileSHA1,
+		Md5:        fileMD5,
+		ChunkSize:  partSize,
+		FormatType: "file",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("precreate failed: %w", err)
 	}
+
+	// Construct auth_meta from precreate response
+	rawMeta := fmt.Sprintf(`{"upload_id":"%s","task_id":"%s","fid":"%s"}`, preResp.UploadID, preResp.TaskID, preResp.FileID)
+	authMetaStr := base64.StdEncoding.EncodeToString([]byte(rawMeta))
 
 	if preResp.RapidUpload {
 		return &core.Object{
@@ -176,16 +208,11 @@ func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, 
 	}
 
 	uploadID := preResp.UploadID
-	partSize = preResp.PartSize
-	if partSize <= 0 {
-		partSize = 10 * 1024 * 1024
+	// Use server-provided part size if available, otherwise keep our calculated size
+	if preResp.PartSize > 0 && preResp.PartSize > partSize {
+		partSize = preResp.PartSize
 	}
-	
-	// Enforce limit: Max ~9000 parts per file for OSS/S3
-	if size/partSize > 9000 {
-		partSize = (size / 9000) + (1024 * 1024) // Ensure > 10MB to reduce part count
-	}
-	
+
 	totalParts := int((size + partSize - 1) / partSize)
 
 	statePath := d.getStatePath(name, size, uploadID)
@@ -199,7 +226,7 @@ func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, 
 		}
 	}
 
-	auth, err := d.api.GetUploadAuth(ctx, uploadID)
+	auth, err := d.api.Auth(ctx, &AuthReq{TaskID: preResp.TaskID, UploadID: uploadID, AuthMeta: json.RawMessage(authMetaStr)})
 	if err != nil {
 		return nil, fmt.Errorf("get auth: %w", err)
 	}
@@ -358,6 +385,11 @@ func (d *Driver) resolvePathToParent(ctx context.Context, pathOrID string) (stri
 func (d *Driver) resolvePath(ctx context.Context, path string) (string, error) {
 	if path == "" {
 		return "0", nil
+	}
+	// Strip driver prefix like "quark:"
+	if strings.Contains(path, ":") {
+		parts := strings.SplitN(path, ":", 2)
+		path = parts[1]
 	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	currentID := "0"

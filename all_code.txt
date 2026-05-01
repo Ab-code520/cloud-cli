@@ -1541,19 +1541,10 @@ Examples:
 					}
 				}
 
-				f, err := os.Open(path)
-				if err != nil {
-					fmt.Printf("❌ Cannot open '%s': %v\n", path, err)
-					failed++
-					continue
-				}
-
 				fmt.Printf("⬆️ Uploading %s (%s)...\n", info.Name(), formatSize(info.Size()))
 
-				_, err = driver.Put(ctx, f, remoteDir, info.Name(), info.Size())
-				f.Close()
-
-				if err != nil {
+				// Fix #2: Safe file handle management via helper function
+				if err := uploadFile(ctx, driver, path, remoteDir, info); err != nil {
 					fmt.Printf("❌ Failed to upload '%s': %v\n", info.Name(), err)
 					failed++
 				} else {
@@ -1566,6 +1557,18 @@ Examples:
 		fmt.Printf("\n📊 Summary: %d uploaded, %d skipped, %d failed\n", uploaded, skipped, failed)
 		return nil
 	},
+}
+
+// uploadFile safely opens, uploads, and closes a single file.
+func uploadFile(ctx context.Context, driver core.Storage, path string, remoteDir *core.Object, info os.FileInfo) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("cannot open file: %w", err)
+	}
+	defer f.Close() // Guarantees FD release even if Put panics or errors
+
+	_, err = driver.Put(ctx, f, remoteDir, info.Name(), info.Size())
+	return err
 }
 
 // uploadDirRecursive uploads a directory recursively
@@ -1608,18 +1611,9 @@ func uploadDirRecursive(ctx context.Context, driver core.Storage, localDir strin
 				}
 			}
 			
-			f, err := os.Open(fullPath)
-			if err != nil {
-				return err
-			}
-			
 			fmt.Printf("⬆️ Uploading %s (%s)...\n", info.Name(), formatSize(info.Size()))
-			_, err = driver.Put(ctx, f, remoteDir, info.Name(), info.Size())
-			f.Close()
-			
-			if err != nil {
-				fmt.Printf("❌ Failed to upload '%s': %v\n", info.Name(), err)
-				return err
+			if err := uploadFile(ctx, driver, fullPath, remoteDir, info); err != nil {
+				return fmt.Errorf("upload '%s': %w", info.Name(), err)
 			}
 		}
 	}
@@ -1779,6 +1773,28 @@ func (pb *ProgressBar) Render() string {
 		FormatSize(pb.total),
 		FormatDuration(remaining),
 	)
+}
+
+// MicroRender outputs a highly compressed progress string for small terminals (e.g., 2.8" screens, mobile SSH).
+// Format: "50%|1.2M/s|10s" (fits in ~20 chars)
+func (pb *ProgressBar) MicroRender() string {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	percent := float64(pb.current) / float64(pb.total) * 100
+	if percent > 100 {
+		percent = 100
+	}
+
+	remaining := time.Duration(float64(pb.total-pb.current)/pb.speed) * time.Second
+
+	speedStr := FormatSpeed(pb.speed)
+	// Compress speed string for micro mode
+	if len(speedStr) > 6 {
+		speedStr = speedStr[:5]
+	}
+
+	return fmt.Sprintf("%3.0f%%|%s|%s", percent, speedStr, FormatDuration(remaining))
 }
 
 
@@ -2036,14 +2052,23 @@ func NewPool(concurrency int) *Pool {
 }
 
 // Go runs the function in the worker pool.
+// Go submits a task to the pool. Uses select to avoid blocking when context is cancelled.
 func (p *Pool) Go(fn func(ctx context.Context) error) {
-	p.wg.Add(1)
-	p.sem <- struct{}{} // Acquire semaphore
+	// Fix #1: Context-aware submission to prevent CPU spinning during fast-fail
+	select {
+	case <-p.ctx.Done():
+		// Already cancelled, discard task immediately
+		return
+	case p.sem <- struct{}{}:
+		// Acquired semaphore
+	}
 
+	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		defer func() { <-p.sem }() // Release semaphore
+		defer func() { <-p.sem }()
 
+		// Double-check context in case cancelled while waiting for semaphore
 		if p.ctx.Err() != nil {
 			return
 		}
@@ -2052,7 +2077,7 @@ func (p *Pool) Go(fn func(ctx context.Context) error) {
 			p.mu.Lock()
 			if p.err == nil {
 				p.err = err
-				p.cancel() // Cancel pool to stop other tasks
+				p.cancel()
 			}
 			p.mu.Unlock()
 		}
