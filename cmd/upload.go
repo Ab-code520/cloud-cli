@@ -99,19 +99,10 @@ Examples:
 					}
 				}
 
-				f, err := os.Open(path)
-				if err != nil {
-					fmt.Printf("❌ Cannot open '%s': %v\n", path, err)
-					failed++
-					continue
-				}
-
 				fmt.Printf("⬆️ Uploading %s (%s)...\n", info.Name(), formatSize(info.Size()))
 
-				_, err = driver.Put(ctx, f, remoteDir, info.Name(), info.Size())
-				f.Close()
-
-				if err != nil {
+				// Fix #2: Safe file handle management via helper function
+				if err := uploadFile(ctx, driver, path, remoteDir, info); err != nil {
 					fmt.Printf("❌ Failed to upload '%s': %v\n", info.Name(), err)
 					failed++
 				} else {
@@ -124,6 +115,18 @@ Examples:
 		fmt.Printf("\n📊 Summary: %d uploaded, %d skipped, %d failed\n", uploaded, skipped, failed)
 		return nil
 	},
+}
+
+// uploadFile safely opens, uploads, and closes a single file.
+func uploadFile(ctx context.Context, driver core.Storage, path string, remoteDir *core.Object, info os.FileInfo) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("cannot open file: %w", err)
+	}
+	defer f.Close() // Guarantees FD release even if Put panics or errors
+
+	_, err = driver.Put(ctx, f, remoteDir, info.Name(), info.Size())
+	return err
 }
 
 // uploadDirRecursive uploads a directory recursively
@@ -166,18 +169,9 @@ func uploadDirRecursive(ctx context.Context, driver core.Storage, localDir strin
 				}
 			}
 			
-			f, err := os.Open(fullPath)
-			if err != nil {
-				return err
-			}
-			
 			fmt.Printf("⬆️ Uploading %s (%s)...\n", info.Name(), formatSize(info.Size()))
-			_, err = driver.Put(ctx, f, remoteDir, info.Name(), info.Size())
-			f.Close()
-			
-			if err != nil {
-				fmt.Printf("❌ Failed to upload '%s': %v\n", info.Name(), err)
-				return err
+			if err := uploadFile(ctx, driver, fullPath, remoteDir, info); err != nil {
+				return fmt.Errorf("upload '%s': %w", info.Name(), err)
 			}
 		}
 	}

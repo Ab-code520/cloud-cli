@@ -117,3 +117,25 @@ func (pb *ProgressBar) Render() string {
 		FormatDuration(remaining),
 	)
 }
+
+// MicroRender outputs a highly compressed progress string for small terminals (e.g., 2.8" screens, mobile SSH).
+// Format: "50%|1.2M/s|10s" (fits in ~20 chars)
+func (pb *ProgressBar) MicroRender() string {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	percent := float64(pb.current) / float64(pb.total) * 100
+	if percent > 100 {
+		percent = 100
+	}
+
+	remaining := time.Duration(float64(pb.total-pb.current)/pb.speed) * time.Second
+
+	speedStr := FormatSpeed(pb.speed)
+	// Compress speed string for micro mode
+	if len(speedStr) > 6 {
+		speedStr = speedStr[:5]
+	}
+
+	return fmt.Sprintf("%3.0f%%|%s|%s", percent, speedStr, FormatDuration(remaining))
+}

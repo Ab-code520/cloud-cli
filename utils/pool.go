@@ -29,14 +29,23 @@ func NewPool(concurrency int) *Pool {
 }
 
 // Go runs the function in the worker pool.
+// Go submits a task to the pool. Uses select to avoid blocking when context is cancelled.
 func (p *Pool) Go(fn func(ctx context.Context) error) {
-	p.wg.Add(1)
-	p.sem <- struct{}{} // Acquire semaphore
+	// Fix #1: Context-aware submission to prevent CPU spinning during fast-fail
+	select {
+	case <-p.ctx.Done():
+		// Already cancelled, discard task immediately
+		return
+	case p.sem <- struct{}{}:
+		// Acquired semaphore
+	}
 
+	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		defer func() { <-p.sem }() // Release semaphore
+		defer func() { <-p.sem }()
 
+		// Double-check context in case cancelled while waiting for semaphore
 		if p.ctx.Err() != nil {
 			return
 		}
@@ -45,7 +54,7 @@ func (p *Pool) Go(fn func(ctx context.Context) error) {
 			p.mu.Lock()
 			if p.err == nil {
 				p.err = err
-				p.cancel() // Cancel pool to stop other tasks
+				p.cancel()
 			}
 			p.mu.Unlock()
 		}
