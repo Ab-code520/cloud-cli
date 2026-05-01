@@ -230,6 +230,51 @@ func (a *QuarkAPI) GetDownloadURL(ctx context.Context, fid string) (string, erro
 }
 
 // ═══════════════════════════════════════════
+// File Info API
+// ═══════════════════════════════════════════
+
+const apiDetail = "/1/clouddrive/file/detail"
+
+type FileInfoReq struct {
+	Fid string `json:"fid"`
+}
+
+type FileInfoResp struct {
+	Fid       string `json:"fid"`
+	FileName  string `json:"file_name"`
+	Size      int64  `json:"size"`
+	IsDir     bool   `json:"is_dir"`
+	UpdatedAt int64  `json:"updated_at"`
+	Hash      string `json:"sha1,omitempty"`
+}
+
+func (a *QuarkAPI) GetFileInfo(ctx context.Context, fid string) (*FileInfoResp, error) {
+	req := FileInfoReq{Fid: fid}
+	var resp FileInfoResp
+	err := a.request(ctx, http.MethodPost, apiDetail, req, &resp)
+	return &resp, err
+}
+
+// ═══════════════════════════════════════════
+// File Copy API
+// ═══════════════════════════════════════════
+
+const apiCopy = "/1/clouddrive/file/copy"
+
+type CopyFileReq struct {
+	Fids    []string `json:"fids"`
+	PdirFid string   `json:"pdir_fid"`
+}
+
+func (a *QuarkAPI) CopyFile(ctx context.Context, srcFid, destDirFid string) error {
+	req := CopyFileReq{
+		Fids:    []string{srcFid},
+		PdirFid: destDirFid,
+	}
+	return a.request(ctx, http.MethodPost, apiCopy, req, nil)
+}
+
+// ═══════════════════════════════════════════
 // QR Login API
 // ═══════════════════════════════════════════
 

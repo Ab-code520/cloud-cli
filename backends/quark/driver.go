@@ -257,6 +257,33 @@ func (d *Driver) Move(ctx context.Context, src *core.Object, destDir *core.Objec
 func (d *Driver) Rename(ctx context.Context, obj *core.Object, newName string) error { return nil }
 func (d *Driver) Mkdir(ctx context.Context, pathOrID string) (*core.Object, error)   { return nil, nil }
 
+func (d *Driver) Info(ctx context.Context, pathOrID string) (*core.Object, error) {
+	if pathOrID == "" {
+		pathOrID = "0" // Root
+	}
+	resp, err := d.api.GetFileInfo(ctx, pathOrID)
+	if err != nil {
+		return nil, err
+	}
+	return &core.Object{
+		ID:      resp.Fid,
+		Name:    resp.FileName,
+		Size:    resp.Size,
+		IsDir:   resp.IsDir,
+		ModTime: time.Unix(resp.UpdatedAt, 0),
+		Path:    resp.Fid,
+		Hash:    resp.Hash,
+	}, nil
+}
+
+func (d *Driver) Copy(ctx context.Context, src *core.Object, destDir *core.Object) error {
+	destID := destDir.ID
+	if destID == "" {
+		destID = "0"
+	}
+	return d.api.CopyFile(ctx, src.ID, destID)
+}
+
 func (d *Driver) getStatePath(name string, size int64, uploadID string) string {
 	key := fmt.Sprintf("%s_%d_%s", name, size, uploadID)
 	hash := fmt.Sprintf("%x", []byte(key))

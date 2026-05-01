@@ -68,6 +68,12 @@ type Storage interface {
 	// Mkdir creates a directory.
 	Mkdir(ctx context.Context, pathOrID string) (*Object, error)
 
+	// Info retrieves detailed metadata for a specific file/folder.
+	Info(ctx context.Context, pathOrID string) (*Object, error)
+
+	// Copy copies a file/folder to a destination directory.
+	Copy(ctx context.Context, src *Object, destDir *Object) error
+
 	// Close releases any resources held by the driver.
 	Close() error
 }
