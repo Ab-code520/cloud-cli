@@ -36,7 +36,28 @@ type UploadState struct {
 	CreatedAt     time.Time        `json:"created_at"`
 }
 
-// Storage is the interface that all backend drivers must implement.
+// ShareInfo holds metadata about a shared file/folder.
+type ShareInfo struct {
+	ShareID   string
+	URL       string
+	Title     string
+	IsExpired bool
+	FileCount int
+	CreatedAt int64
+}
+
+// RecycleItem holds metadata about an item in the recycle bin.
+type RecycleItem struct {
+	FID        string
+	FileName   string
+	Size       int64
+	IsDir      bool
+	DeletedAt  int64
+}
+
+// ─────────────────────────────────────────────────────────────
+// Base Interface: Every cloud drive MUST implement this.
+// ─────────────────────────────────────────────────────────────
 type Storage interface {
 	// Name returns the driver name.
 	Name() string
@@ -74,30 +95,40 @@ type Storage interface {
 	// Copy copies a file/folder to a destination directory.
 	Copy(ctx context.Context, src *Object, destDir *Object) error
 
-	// CreateShare creates a share for the given file IDs.
-	CreateShare(ctx context.Context, fileIDs []string, expiredDay int) (*struct{ ShareID, URL string }, error)
-
-	// ListShares lists all shares.
-	ListShares(ctx context.Context, page, size int) ([]struct{ ShareID, URL, Title string; IsExpired bool; FileCount int; CreatedAt int64 }, error)
-
-	// DeleteShare deletes one or more shares.
-	DeleteShare(ctx context.Context, shareIDs []string) error
-
-	// Search searches for files/folders by query.
-	Search(ctx context.Context, query, pdirFid string, page, size int) ([]*Object, error)
-
-	// Quota returns the storage space usage.
-	Quota(ctx context.Context) (*struct{ Total, Used int64 }, error)
-
-	// ListRecycle lists items in the recycle bin.
-	ListRecycle(ctx context.Context, page, size int) ([]struct{ Fid, FileName string; Size int64; IsDir bool; DeletedAt int64 }, error)
-
-	// RecoverRecycle recovers items from the recycle bin.
-	RecoverRecycle(ctx context.Context, fids []string) error
-
-	// DeleteRecycle permanently deletes items from the recycle bin.
-	DeleteRecycle(ctx context.Context, fids []string) error
-
 	// Close releases any resources held by the driver.
 	Close() error
+}
+
+// ─────────────────────────────────────────────────────────────
+// Extension Interfaces: Capabilities that are optional.
+// Drivers implement only what they support.
+// ─────────────────────────────────────────────────────────────
+
+// Sharable represents the capability to create and manage shares.
+type Sharable interface {
+	CreateShare(ctx context.Context, fileIDs []string, expiredDay int) (shareURL string, err error)
+	ListShares(ctx context.Context, page, size int) ([]ShareInfo, error)
+	DeleteShare(ctx context.Context, shareIDs []string) error
+}
+
+// Searchable represents the capability to search files.
+type Searchable interface {
+	Search(ctx context.Context, query, pdirFid string, page, size int) ([]*Object, error)
+}
+
+// QuotaProvider represents the capability to check storage usage.
+type QuotaProvider interface {
+	Quota(ctx context.Context) (total, used int64, err error)
+}
+
+// RecycleBin represents the capability to manage a recycle bin.
+type RecycleBin interface {
+	ListRecycle(ctx context.Context, page, size int) ([]RecycleItem, error)
+	RecoverRecycle(ctx context.Context, fids []string) error
+	DeleteRecycle(ctx context.Context, fids []string) error
+}
+
+// OfflineDownloader represents the capability to add offline download tasks.
+type OfflineDownloader interface {
+	AddOfflineTask(ctx context.Context, url string) error
 }

@@ -27,6 +27,10 @@ func NewDriver() core.Storage {
 	}
 }
 
+func init() {
+	core.Register("quark", NewDriver)
+}
+
 func (d *Driver) Name() string { return "quark" }
 
 func (d *Driver) Init(cfg map[string]string) error {
@@ -280,23 +284,20 @@ func (d *Driver) Copy(ctx context.Context, src *core.Object, destDir *core.Objec
 	return d.api.CopyFile(ctx, src.ID, destID)
 }
 
-func (d *Driver) CreateShare(ctx context.Context, fileIDs []string, expiredDay int) (*struct{ ShareID, URL string }, error) {
+func (d *Driver) CreateShare(ctx context.Context, fileIDs []string, expiredDay int) (string, error) {
 	resp, err := d.api.CreateShare(ctx, fileIDs, expiredDay)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return &struct{ ShareID, URL string }{
-		ShareID: resp.ShareID,
-		URL:     resp.URL,
-	}, nil
+	return resp.URL, nil
 }
 
-func (d *Driver) ListShares(ctx context.Context, page, size int) ([]struct{ ShareID, URL, Title string; IsExpired bool; FileCount int; CreatedAt int64 }, error) {
+func (d *Driver) ListShares(ctx context.Context, page, size int) ([]core.ShareInfo, error) {
 	resp, err := d.api.ListShares(ctx, page, size)
 	if err != nil {
 		return nil, err
 	}
-	result := make([]struct{ ShareID, URL, Title string; IsExpired bool; FileCount int; CreatedAt int64 }, len(resp.List))
+	result := make([]core.ShareInfo, len(resp.List))
 	for i, item := range resp.List {
 		result[i].ShareID = item.ShareID
 		result[i].URL = item.URL
@@ -343,22 +344,22 @@ func (d *Driver) Rename(ctx context.Context, obj *core.Object, newName string) e
 	return d.api.RenameFile(ctx, obj.ID, newName)
 }
 
-func (d *Driver) Quota(ctx context.Context) (*struct{ Total, Used int64 }, error) {
+func (d *Driver) Quota(ctx context.Context) (int64, int64, error) {
 	resp, err := d.api.GetSpace(ctx)
 	if err != nil {
-		return nil, err
+		return 0, 0, err
 	}
-	return &struct{ Total, Used int64 }{Total: resp.TotalCapacity, Used: resp.UsedSpace}, nil
+	return resp.TotalCapacity, resp.UsedSpace, nil
 }
 
-func (d *Driver) ListRecycle(ctx context.Context, page, size int) ([]struct{ Fid, FileName string; Size int64; IsDir bool; DeletedAt int64 }, error) {
+func (d *Driver) ListRecycle(ctx context.Context, page, size int) ([]core.RecycleItem, error) {
 	resp, err := d.api.ListRecycle(ctx, page, size)
 	if err != nil {
 		return nil, err
 	}
-	result := make([]struct{ Fid, FileName string; Size int64; IsDir bool; DeletedAt int64 }, len(resp.List))
+	result := make([]core.RecycleItem, len(resp.List))
 	for i, item := range resp.List {
-		result[i].Fid = item.Fid
+		result[i].FID = item.Fid
 		result[i].FileName = item.FileName
 		result[i].Size = item.Size
 		result[i].IsDir = item.IsDir

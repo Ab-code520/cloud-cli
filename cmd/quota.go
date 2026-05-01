@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/Ab-code520/cloud-cli/core"
 	"github.com/spf13/cobra"
 )
 
@@ -16,15 +17,20 @@ var quotaCmd = &cobra.Command{
 		}
 		defer driver.Close()
 
-		space, err := driver.Quota(cmd.Context())
+		qp, ok := driver.(core.QuotaProvider)
+		if !ok {
+			return fmt.Errorf("storage quota is not supported by this driver")
+		}
+
+		total, used, err := qp.Quota(cmd.Context())
 		if err != nil {
 			return err
 		}
 
-		totalGB := float64(space.Total) / 1024 / 1024 / 1024
-		usedGB := float64(space.Used) / 1024 / 1024 / 1024
+		totalGB := float64(total) / 1024 / 1024 / 1024
+		usedGB := float64(used) / 1024 / 1024 / 1024
 		freeGB := totalGB - usedGB
-		usagePercent := float64(space.Used) / float64(space.Total) * 100
+		usagePercent := float64(used) / float64(total) * 100
 
 		fmt.Println("💾 Cloud Drive Storage Usage")
 		fmt.Println("─────────────────────────────")

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Ab-code520/cloud-cli/core"
 	"github.com/spf13/cobra"
 )
 
@@ -28,10 +29,15 @@ var recycleListCmd = &cobra.Command{
 		}
 		defer driver.Close()
 
+		rb, ok := driver.(core.RecycleBin)
+		if !ok {
+			return fmt.Errorf("recycle bin is not supported by this driver")
+		}
+
 		page, _ := cmd.Flags().GetInt("page")
 		size, _ := cmd.Flags().GetInt("size")
 
-		items, err := driver.ListRecycle(cmd.Context(), page, size)
+		items, err := rb.ListRecycle(cmd.Context(), page, size)
 		if err != nil {
 			return err
 		}
@@ -52,7 +58,7 @@ var recycleListCmd = &cobra.Command{
 				sizeStr = fmt.Sprintf(" (%s)", formatSize(item.Size))
 			}
 			fmt.Printf("%s %s%s\n", typeIcon, item.FileName, sizeStr)
-			fmt.Printf("   🆔 %s | 🗑️ Deleted: %s\n\n", item.Fid, time.Unix(item.DeletedAt, 0).Format("2006-01-02 15:04:05"))
+			fmt.Printf("   🆔 %s | 🗑️ Deleted: %s\n\n", item.FID, time.Unix(item.DeletedAt, 0).Format("2006-01-02 15:04:05"))
 		}
 		return nil
 	},
@@ -69,7 +75,12 @@ var recycleRestoreCmd = &cobra.Command{
 		}
 		defer driver.Close()
 
-		err = driver.RecoverRecycle(cmd.Context(), args)
+		rb, ok := driver.(core.RecycleBin)
+		if !ok {
+			return fmt.Errorf("recycle bin is not supported by this driver")
+		}
+
+		err = rb.RecoverRecycle(cmd.Context(), args)
 		if err != nil {
 			return err
 		}
@@ -91,7 +102,12 @@ var recycleDeleteCmd = &cobra.Command{
 		}
 		defer driver.Close()
 
-		err = driver.DeleteRecycle(cmd.Context(), args)
+		rb, ok := driver.(core.RecycleBin)
+		if !ok {
+			return fmt.Errorf("recycle bin is not supported by this driver")
+		}
+
+		err = rb.DeleteRecycle(cmd.Context(), args)
 		if err != nil {
 			return err
 		}

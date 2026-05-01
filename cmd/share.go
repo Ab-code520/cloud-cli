@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Ab-code520/cloud-cli/core"
 	"github.com/spf13/cobra"
 )
 
@@ -34,15 +35,19 @@ Examples:
 		}
 		defer driver.Close()
 
+		sh, ok := driver.(core.Sharable)
+		if !ok {
+			return fmt.Errorf("share is not supported by this driver")
+		}
+
 		days, _ := cmd.Flags().GetInt("days")
-		share, err := driver.CreateShare(cmd.Context(), args, days)
+		url, err := sh.CreateShare(cmd.Context(), args, days)
 		if err != nil {
 			return err
 		}
 
 		fmt.Printf("✅ Share created successfully!\n")
-		fmt.Printf("🔗 URL: %s\n", share.URL)
-		fmt.Printf("🆔 Share ID: %s\n", share.ShareID)
+		fmt.Printf("🔗 URL: %s\n", url)
 		return nil
 	},
 }
@@ -57,7 +62,12 @@ var shareListCmd = &cobra.Command{
 		}
 		defer driver.Close()
 
-		shares, err := driver.ListShares(cmd.Context(), 1, 50)
+		sh, ok := driver.(core.Sharable)
+		if !ok {
+			return fmt.Errorf("share is not supported by this driver")
+		}
+
+		shares, err := sh.ListShares(cmd.Context(), 1, 50)
 		if err != nil {
 			return err
 		}
@@ -93,7 +103,12 @@ var shareDeleteCmd = &cobra.Command{
 		}
 		defer driver.Close()
 
-		err = driver.DeleteShare(cmd.Context(), args)
+		sh, ok := driver.(core.Sharable)
+		if !ok {
+			return fmt.Errorf("share is not supported by this driver")
+		}
+
+		err = sh.DeleteShare(cmd.Context(), args)
 		if err != nil {
 			return err
 		}

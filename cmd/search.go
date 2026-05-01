@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/Ab-code520/cloud-cli/core"
 	"github.com/spf13/cobra"
 )
 
@@ -25,11 +26,16 @@ Examples:
 		}
 		defer driver.Close()
 
+		s, ok := driver.(core.Searchable)
+		if !ok {
+			return fmt.Errorf("search is not supported by this driver")
+		}
+
 		dirID, _ := cmd.Flags().GetString("dir")
 		page, _ := cmd.Flags().GetInt("page")
 		size, _ := cmd.Flags().GetInt("size")
 
-		results, err := driver.Search(cmd.Context(), query, dirID, page, size)
+		results, err := s.Search(cmd.Context(), query, dirID, page, size)
 		if err != nil {
 			return err
 		}

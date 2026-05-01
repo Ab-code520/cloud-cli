@@ -138,23 +138,33 @@ func extractCookie(status *quark.QRQueryResp) string {
 
 // loginWithCookie saves the cookie to config file.
 func loginWithCookie(driverName string, cookie string) error {
-	cfg := core.Config{
-		CurrentDriver: driverName,
-		Drivers: map[string]*core.DriverConfig{
-			driverName: {
-				Type: driverName,
-				Tokens: map[string]string{
-					"cookie": cookie,
-				},
-			},
+	// Load or initialize config
+	cfg, err := core.LoadConfig("")
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	core.GlobalConfig = cfg
+
+	// Save account
+	acc := &core.Account{
+		Type: driverName,
+		Cookie: map[string]string{
+			"cookie": cookie,
 		},
 	}
 
-	configPath := filepath.Join(os.Getenv("HOME"), ".config", "cloud-cli", "config.json")
-	if err := core.SaveConfig(configPath, &cfg); err != nil {
-		return err
+	accountName := driverName + "-default"
+	if err := core.GlobalConfig.AddAccount(accountName, acc); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
 	}
 
+	// Set as default
+	core.GlobalConfig.Default = accountName
+	if err := core.GlobalConfig.Save(); err != nil {
+		return fmt.Errorf("failed to update default: %w", err)
+	}
+
+	configPath := filepath.Join(os.Getenv("HOME"), ".config", "cloud-cli", "config.yaml")
 	fmt.Printf("✅ Logged in to %s successfully.\n", driverName)
 	fmt.Printf("📁 Config saved to: %s\n", configPath)
 	return nil
