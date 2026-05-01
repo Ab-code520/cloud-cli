@@ -6,9 +6,6 @@ cloud-cli
 # Config (contains tokens!)
 config.json
 
-# Go
-go.sum
-
 # OS
 .DS_Store
 Thumbs.db
