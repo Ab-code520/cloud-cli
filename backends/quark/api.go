@@ -228,3 +228,142 @@ func (a *QuarkAPI) GetDownloadURL(ctx context.Context, fid string) (string, erro
 	}
 	return resp.List[0].DownloadURL, nil
 }
+
+// ═══════════════════════════════════════════
+// QR Login API
+// ═══════════════════════════════════════════
+
+const (
+	qrBaseURL    = "https://uop.quark.cn"
+	qrGenerate   = "/api/v1/auth/qrcode/generate"
+	qrQuery      = "/api/v1/auth/qrcode/query"
+	qrAuthorize  = "https://su.quark.cn/4_e3f80838a74530001d816a5628a6addd"
+)
+
+// QRTokenResp is the response from generating a QR code.
+type QRTokenResp struct {
+	Token string `json:"token"`
+	URL   string `json:"url"`
+}
+
+// GenerateQR creates a new QR login session and returns the token + login URL.
+func (a *QuarkAPI) GenerateQR(ctx context.Context) (*QRTokenResp, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, qrBaseURL+qrGenerate, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("generate QR failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var baseResp struct {
+		Status  int             `json:"status"`
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(respData, &baseResp); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	if baseResp.Status != 200 || baseResp.Code != 0 {
+		return nil, fmt.Errorf("api error %d: %s", baseResp.Code, baseResp.Message)
+	}
+
+	var qrResp QRTokenResp
+	if err := json.Unmarshal(baseResp.Data, &qrResp); err != nil {
+		return nil, fmt.Errorf("parse QR data: %w", err)
+	}
+	return &qrResp, nil
+}
+
+// QRStatus is the polling result for QR login status.
+type QRStatus string
+
+const (
+	QRNotScanned   QRStatus = "NOT_SCANNED"
+	QRScanned      QRStatus = "SCANNED"
+	QRConfirmed    QRStatus = "CONFIRMED"
+	QRExpired      QRStatus = "EXPIRED"
+	QRUnknownState QRStatus = "UNKNOWN"
+)
+
+// QRQueryResp is the response from polling QR status.
+type QRQueryResp struct {
+	Status      QRStatus `json:"status"`
+	Cookie      string   `json:"cookie"`
+	RedirectURL string   `json:"redirect_url"`
+	Message     string   `json:"message"`
+}
+
+// QueryQRStatus polls the QR login status.
+// Returns the status and optional cookie/redirect_url when confirmed.
+func (a *QuarkAPI) QueryQRStatus(ctx context.Context, token string) (*QRQueryResp, error) {
+	url := fmt.Sprintf("%s%s?token=%s", qrBaseURL, qrQuery, token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("query QR status failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var baseResp struct {
+		Status  int             `json:"status"`
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(respData, &baseResp); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	var qrResult QRQueryResp
+
+	// Quark uses status 200001 for not scanned, 200003 for scanned, 200004 for confirmed/expired
+	switch baseResp.Code {
+	case 0:
+		// Parsed as confirmed, try to extract cookie from data
+		if baseResp.Data != nil {
+			json.Unmarshal(baseResp.Data, &qrResult)
+		}
+		qrResult.Status = QRConfirmed
+		return &qrResult, nil
+	case 200001:
+		qrResult.Status = QRNotScanned
+		return &qrResult, nil
+	case 200003:
+		qrResult.Status = QRScanned
+		return &qrResult, nil
+	case 200004:
+		qrResult.Status = QRExpired
+		return &qrResult, nil
+	default:
+		qrResult.Status = QRUnknownState
+		qrResult.Message = baseResp.Message
+		return &qrResult, nil
+	}
+}
