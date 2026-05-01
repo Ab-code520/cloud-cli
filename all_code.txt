@@ -1,0 +1,3902 @@
+
+
+/// --- ./cmd/info.go --- ///
+
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
+
+var infoCmd = &cobra.Command{
+	Use:   "info [file_id]",
+	Short: "Show detailed information about a file or folder",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		fileID := args[0]
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		obj, err := driver.Info(cmd.Context(), fileID)
+		if err != nil {
+			return err
+		}
+
+		return outputTableOrJSON(obj, func() {
+			typeStr := "File"
+			if obj.IsDir {
+				typeStr = "Folder"
+			}
+
+			fmt.Printf("📂 Name: %s\n", obj.Name)
+			fmt.Printf("🆔 ID: %s\n", obj.ID)
+			fmt.Printf("📦 Type: %s\n", typeStr)
+			
+			if !obj.IsDir {
+				fmt.Printf("💾 Size: %s\n", formatSize(obj.Size))
+				if obj.Hash != "" {
+					fmt.Printf("#️⃣ SHA1: %s\n", obj.Hash)
+				}
+			}
+			
+			fmt.Printf("🕒 Modified: %s\n", obj.ModTime.Format("2006-01-02 15:04:05"))
+		})
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(infoCmd)
+}
+
+
+/// --- ./cmd/ls.go --- ///
+
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
+
+var lsCmd = &cobra.Command{
+	Use:   "ls [path]",
+	Short: "List directory",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		
+		path := "/"
+		if len(args) > 0 {
+			path = args[0]
+		}
+		
+		objects, err := driver.List(cmd.Context(), path)
+		if err != nil {
+			return err
+		}
+		
+		return outputTableOrJSON(objects, func() {
+			fmt.Printf("%-30s %-10s %s\n", "NAME", "SIZE", "TIME")
+			for _, obj := range objects {
+				size := "-"
+				if !obj.IsDir {
+					size = formatSize(obj.Size)
+				} else {
+					size = "DIR"
+				}
+				name := obj.Name
+				if obj.IsDir {
+					name += "/"
+				}
+				fmt.Printf("%-30s %-10s %s\n", name, size, obj.ModTime.Format("2006-01-02 15:04"))
+			}
+		})
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(lsCmd)
+}
+
+
+/// --- ./cmd/share.go --- ///
+
+package cmd
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/spf13/cobra"
+)
+
+var shareCmd = &cobra.Command{
+	Use:   "share [subcommand]",
+	Short: "Manage file shares (create, list, delete)",
+	Long: `Manage file shares for cloud drive.
+
+Examples:
+  cloud-cli share create file_id1 file_id2    # Create a share for files
+  cloud-cli share list                        # List all shares
+  cloud-cli share delete share_id1 share_id2  # Delete shares`,
+}
+
+var shareCreateCmd = &cobra.Command{
+	Use:   "create [file_id...]",
+	Short: "Create a share for files/folders",
+	Long: `Create a share for one or more files or folders.
+
+Examples:
+  cloud-cli share create abc123              # Permanent share
+  cloud-cli share create abc123 --days 7     # 7-day share`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		sh, ok := driver.(core.Sharable)
+		if !ok {
+			return fmt.Errorf("share is not supported by this driver")
+		}
+
+		days, _ := cmd.Flags().GetInt("days")
+		url, err := sh.CreateShare(cmd.Context(), args, days)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("✅ Share created successfully!\n")
+		fmt.Printf("🔗 URL: %s\n", url)
+		return nil
+	},
+}
+
+var shareListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all shares",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		sh, ok := driver.(core.Sharable)
+		if !ok {
+			return fmt.Errorf("share is not supported by this driver")
+		}
+
+		shares, err := sh.ListShares(cmd.Context(), 1, 50)
+		if err != nil {
+			return err
+		}
+
+		if len(shares) == 0 {
+			fmt.Println("No shares found.")
+			return nil
+		}
+
+		fmt.Printf("📦 Found %d shares:\n\n", len(shares))
+		for _, s := range shares {
+			status := "🟢 Active"
+			if s.IsExpired {
+				status = "🔴 Expired"
+			}
+			fmt.Printf("%s %s\n", status, s.Title)
+			fmt.Printf("   ID: %s\n", s.ShareID)
+			fmt.Printf("   🔗 %s\n", s.URL)
+			fmt.Printf("   📄 Files: %d | 📅 Created: %s\n\n", s.FileCount, time.Unix(s.CreatedAt, 0).Format("2006-01-02"))
+		}
+		return nil
+	},
+}
+
+var shareDeleteCmd = &cobra.Command{
+	Use:   "delete [share_id...]",
+	Short: "Delete one or more shares",
+	Args:  cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		sh, ok := driver.(core.Sharable)
+		if !ok {
+			return fmt.Errorf("share is not supported by this driver")
+		}
+
+		err = sh.DeleteShare(cmd.Context(), args)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("✅ Deleted %d share(s) successfully.\n", len(args))
+		return nil
+	},
+}
+
+func init() {
+	shareCreateCmd.Flags().IntP("days", "d", -1, "Expiration days (-1 for permanent)")
+	
+	shareCmd.AddCommand(shareCreateCmd)
+	shareCmd.AddCommand(shareListCmd)
+	shareCmd.AddCommand(shareDeleteCmd)
+	rootCmd.AddCommand(shareCmd)
+}
+
+
+/// --- ./cmd/delete.go --- ///
+
+package cmd
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
+
+var deleteCmd = &cobra.Command{
+	Use:   "delete [id_or_path...]",
+	Short: "Delete file(s) or folder(s)",
+	Long: `Delete one or more files or folders.
+
+Examples:
+  cloud-cli delete file_id                # Delete single file
+  cloud-cli delete id1 id2 id3            # Batch delete
+  cloud-cli delete /path/to/file.txt      # Delete by path`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		deleted := 0
+		failed := 0
+
+		for _, arg := range args {
+			obj, err := findObjectByPath(driver, arg)
+			if err != nil {
+				fmt.Printf("❌ Cannot find '%s': %v\n", arg, err)
+				failed++
+				continue
+			}
+
+			if err := driver.Delete(context.Background(), obj); err != nil {
+				fmt.Printf("❌ Failed to delete '%s': %v\n", obj.Name, err)
+				failed++
+			} else {
+				fmt.Printf("🗑️ Deleted: %s\n", obj.Name)
+				deleted++
+			}
+		}
+
+		fmt.Printf("\n📊 Summary: %d deleted, %d failed\n", deleted, failed)
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(deleteCmd)
+}
+
+
+/// --- ./cmd/output.go --- ///
+
+package cmd
+
+import (
+	"encoding/json"
+	"os"
+	"strings"
+)
+
+// outputFormat controls the global output format (table, json).
+var outputFormat string
+
+// outputJSON encodes v as JSON to stdout.
+func outputJSON(v interface{}) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+// outputTableOrJSON calls tableFn if outputFormat is "table" (default),
+// otherwise encodes v as JSON.
+func outputTableOrJSON(v interface{}, tableFn func()) error {
+	switch strings.ToLower(outputFormat) {
+	case "json":
+		return outputJSON(v)
+	default:
+		tableFn()
+		return nil
+	}
+}
+
+
+/// --- ./cmd/download.go --- ///
+
+package cmd
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
+	"github.com/spf13/cobra"
+)
+
+var downloadCmd = &cobra.Command{
+	Use:   "download [remote_path] [local_path]",
+	Short: "Download file",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		
+		remotePath := args[0]
+		localPath := args[1]
+		
+		obj, err := findObjectByPath(driver, remotePath)
+		if err != nil {
+			return err
+		}
+		
+		if obj.IsDir {
+			return fmt.Errorf("download does not support directories yet")
+		}
+		
+		reader, err := driver.Open(context.Background(), obj, 0)
+		if err != nil {
+			return err
+		}
+		defer reader.Close()
+		
+		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+			return err
+		}
+		
+		out, err := os.Create(localPath)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		
+		fmt.Printf("Downloading %s (%s)...\n", obj.Name, formatSize(obj.Size))
+		
+		// Simple copy, progress bar could be added here via io.TeeReader
+		_, err = io.Copy(out, reader)
+		if err != nil {
+			return err
+		}
+		
+		fmt.Printf("Downloaded to %s\n", localPath)
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(downloadCmd)
+}
+
+
+/// --- ./cmd/rename.go --- ///
+
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
+
+var renameCmd = &cobra.Command{
+	Use:   "rename [file_id] [new_name]",
+	Short: "Rename a file or folder",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		fileID := args[0]
+		newName := args[1]
+		
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		obj, err := driver.Info(cmd.Context(), fileID)
+		if err != nil {
+			return fmt.Errorf("get file info: %w", err)
+		}
+
+		err = driver.Rename(cmd.Context(), obj, newName)
+		if err != nil {
+			return fmt.Errorf("rename failed: %w", err)
+		}
+
+		fmt.Printf("✅ Successfully renamed '%s' to '%s'\n", obj.Name, newName)
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(renameCmd)
+}
+
+
+/// --- ./cmd/recycle.go --- ///
+
+package cmd
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/spf13/cobra"
+)
+
+var recycleCmd = &cobra.Command{
+	Use:   "recycle [subcommand]",
+	Short: "Manage recycle bin (list, restore, delete)",
+	Long: `Manage recycle bin items.
+
+Examples:
+  cloud-cli recycle list                    # List deleted files
+  cloud-cli recycle restore fid1 fid2       # Restore files
+  cloud-cli recycle delete fid1 fid2        # Permanently delete`,
+}
+
+var recycleListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List items in recycle bin",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		rb, ok := driver.(core.RecycleBin)
+		if !ok {
+			return fmt.Errorf("recycle bin is not supported by this driver")
+		}
+
+		page, _ := cmd.Flags().GetInt("page")
+		size, _ := cmd.Flags().GetInt("size")
+
+		items, err := rb.ListRecycle(cmd.Context(), page, size)
+		if err != nil {
+			return err
+		}
+
+		if len(items) == 0 {
+			fmt.Println("♻️ Recycle bin is empty.")
+			return nil
+		}
+
+		fmt.Printf("♻️ Found %d items in recycle bin:\n\n", len(items))
+		for _, item := range items {
+			typeIcon := "📄"
+			if item.IsDir {
+				typeIcon = "📁"
+			}
+			sizeStr := ""
+			if !item.IsDir {
+				sizeStr = fmt.Sprintf(" (%s)", formatSize(item.Size))
+			}
+			fmt.Printf("%s %s%s\n", typeIcon, item.FileName, sizeStr)
+			fmt.Printf("   🆔 %s | 🗑️ Deleted: %s\n\n", item.FID, time.Unix(item.DeletedAt, 0).Format("2006-01-02 15:04:05"))
+		}
+		return nil
+	},
+}
+
+var recycleRestoreCmd = &cobra.Command{
+	Use:   "restore [file_id...]",
+	Short: "Restore items from recycle bin",
+	Args:  cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		rb, ok := driver.(core.RecycleBin)
+		if !ok {
+			return fmt.Errorf("recycle bin is not supported by this driver")
+		}
+
+		err = rb.RecoverRecycle(cmd.Context(), args)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("✅ Successfully restored %d item(s).\n", len(args))
+		return nil
+	},
+}
+
+var recycleDeleteCmd = &cobra.Command{
+	Use:   "delete [file_id...]",
+	Short: "Permanently delete items from recycle bin",
+	Long:  "Permanently delete items from recycle bin. This action cannot be undone!",
+	Args:  cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		rb, ok := driver.(core.RecycleBin)
+		if !ok {
+			return fmt.Errorf("recycle bin is not supported by this driver")
+		}
+
+		err = rb.DeleteRecycle(cmd.Context(), args)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("✅ Permanently deleted %d item(s).\n", len(args))
+		return nil
+	},
+}
+
+func init() {
+	recycleListCmd.Flags().IntP("page", "p", 1, "Page number")
+	recycleListCmd.Flags().IntP("size", "s", 50, "Items per page")
+
+	recycleCmd.AddCommand(recycleListCmd)
+	recycleCmd.AddCommand(recycleRestoreCmd)
+	recycleCmd.AddCommand(recycleDeleteCmd)
+	rootCmd.AddCommand(recycleCmd)
+}
+
+
+/// --- ./cmd/helpers.go --- ///
+
+package cmd
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/Ab-code520/cloud-cli/core"
+)
+
+func formatSize(bytes int64) string {
+	switch {
+	case bytes >= 1024*1024*1024:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/1024/1024/1024)
+	case bytes >= 1024*1024:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/1024/1024)
+	case bytes >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
+// findObjectByPath is a simplified search.
+// It currently only searches the root directory.
+// TODO: Implement full path traversal for production use.
+func findObjectByPath(driver core.Storage, path string) (*core.Object, error) {
+	list, err := driver.List(context.Background(), "")
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range list {
+		// Match by Name or Path (ID)
+		if obj.Name == path || obj.Path == path || obj.ID == path {
+			return obj, nil
+		}
+	}
+	return nil, fmt.Errorf("object not found: %s", path)
+}
+
+
+/// --- ./cmd/mkdir.go --- ///
+
+package cmd
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
+
+var mkdirCmd = &cobra.Command{
+	Use:   "mkdir [path]",
+	Short: "Create directory",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		
+		_, err = driver.Mkdir(context.Background(), args[0])
+		if err != nil {
+			return err
+		}
+		
+		fmt.Printf("Created directory %s\n", args[0])
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(mkdirCmd)
+}
+
+
+/// --- ./cmd/search.go --- ///
+
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/spf13/cobra"
+)
+
+var searchCmd = &cobra.Command{
+	Use:   "search [query]",
+	Short: "Search for files and folders in cloud drive",
+	Long: `Search for files and folders in your cloud drive.
+
+Examples:
+  cloud-cli search "report.pdf"         # Search by filename
+  cloud-cli search "photos" --dir abc   # Search in specific directory
+  cloud-cli search "*.mp4"              # Use wildcard pattern`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		query := args[0]
+		
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		s, ok := driver.(core.Searchable)
+		if !ok {
+			return fmt.Errorf("search is not supported by this driver")
+		}
+
+		dirID, _ := cmd.Flags().GetString("dir")
+		page, _ := cmd.Flags().GetInt("page")
+		size, _ := cmd.Flags().GetInt("size")
+
+		results, err := s.Search(cmd.Context(), query, dirID, page, size)
+		if err != nil {
+			return err
+		}
+
+		if len(results) == 0 {
+			if outputFormat == "json" {
+				return outputTableOrJSON([]interface{}{}, func() {})
+			}
+			fmt.Printf("🔍 No results found for '%s'\n", query)
+			return nil
+		}
+
+		return outputTableOrJSON(results, func() {
+			fmt.Printf("🔍 Found %d results for '%s':\n\n", len(results), query)
+			for _, obj := range results {
+				typeIcon := "📄"
+				if obj.IsDir {
+					typeIcon = "📁"
+				}
+				sizeStr := ""
+				if !obj.IsDir {
+					sizeStr = fmt.Sprintf(" (%s)", formatSize(obj.Size))
+				}
+				fmt.Printf("%s %s%s\n", typeIcon, obj.Name, sizeStr)
+				fmt.Printf("   🆔 %s | 📅 %s\n\n", obj.ID, obj.ModTime.Format("2006-01-02"))
+			}
+		})
+	},
+}
+
+func init() {
+	searchCmd.Flags().StringP("dir", "d", "", "Search in specific directory ID")
+	searchCmd.Flags().IntP("page", "p", 1, "Page number")
+	searchCmd.Flags().IntP("size", "s", 50, "Results per page")
+	rootCmd.AddCommand(searchCmd)
+}
+
+
+/// --- ./cmd/copy.go --- ///
+
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/spf13/cobra"
+)
+
+var copyCmd = &cobra.Command{
+	Use:   "copy [source_id] [dest_dir_id]",
+	Short: "Copy a file or folder to another directory",
+	Long: `Copy a file or folder to another directory.
+
+Examples:
+  cloud-cli copy file123 folder456   # Copy file123 into folder456
+  cloud-cli copy file123 0           # Copy file123 to root directory`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		srcID := args[0]
+		destID := args[1]
+		
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		// Get source object
+		srcObj, err := driver.Info(cmd.Context(), srcID)
+		if err != nil {
+			return fmt.Errorf("get source info: %w", err)
+		}
+
+		// Construct destination directory object
+		destDirObj := &core.Object{ID: destID}
+
+		// Call Copy
+		err = driver.Copy(cmd.Context(), srcObj, destDirObj)
+		if err != nil {
+			return fmt.Errorf("copy failed: %w", err)
+		}
+
+		fmt.Printf("✅ Successfully copied '%s' to directory '%s'\n", srcObj.Name, destID)
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(copyCmd)
+}
+
+
+/// --- ./cmd/sync.go --- ///
+
+package cmd
+
+import (
+	"fmt"
+	"path/filepath"
+
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/spf13/cobra"
+)
+
+var syncCmd = &cobra.Command{
+	Use:   "sync <source> <destination>",
+	Short: "Synchronize directories (Local <-> Cloud)",
+	Long: `Synchronize files between local directory and cloud drive.
+Supports one-way sync (up/down) and deletion of extra files.
+
+Examples:
+  # Upload local folder to quark (only new/changed files)
+  cloud-cli sync ./photos quark:/backup/photos
+
+  # Preview sync (Dry Run)
+  cloud-cli sync ./data quark:/backup --dry-run
+
+  # Sync and delete extra files in destination
+  cloud-cli sync ./important quark:/important --delete`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		srcInput := args[0]
+		destInput := args[1]
+
+		// Parse paths
+		srcDriverName, srcPath, err := parseResourcePath(srcInput)
+		if err != nil {
+			return err
+		}
+		destDriverName, destPath, err := parseResourcePath(destInput)
+		if err != nil {
+			return err
+		}
+
+		// Initialize drivers
+		// For local driver, if path is absolute, we set root to "/" so we can traverse fully.
+		// If relative, we keep default (cwd) and pass relative path.
+		srcRoot := ""
+		if srcDriverName == "local" && filepath.IsAbs(srcPath) {
+			srcRoot = "/"
+		}
+		srcDriver, err := initDriver(srcDriverName, srcRoot)
+		if err != nil {
+			return fmt.Errorf("init source driver: %w", err)
+		}
+		defer srcDriver.Close()
+
+		destRoot := ""
+		if destDriverName == "local" && filepath.IsAbs(destPath) {
+			destRoot = "/"
+		}
+		destDriver, err := initDriver(destDriverName, destRoot)
+		if err != nil {
+			return fmt.Errorf("init dest driver: %w", err)
+		}
+		defer destDriver.Close()
+
+		// Config
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		deleteExtra, _ := cmd.Flags().GetBool("delete")
+
+		syncer := &core.Syncer{
+			Source: srcDriver,
+			Dest:   destDriver,
+			Config: core.SyncConfig{
+				DryRun:      dryRun,
+				DeleteExtra: deleteExtra,
+			},
+			OnAction: func(action *core.SyncAction) {
+				icon := " "
+				switch action.Type {
+				case "upload":
+					icon = "⬆️"
+				case "update":
+					icon = "🔄"
+				case "delete":
+					icon = "🗑️"
+				case "mkdir":
+					icon = "📁"
+				case "skip":
+					icon = "⏭️"
+				}
+				
+				msg := fmt.Sprintf("%s %s %s", icon, action.Type, action.Object.Name)
+				if dryRun {
+					msg += " [DRY RUN]"
+				}
+				fmt.Println(msg)
+			},
+		}
+
+		fmt.Printf("🔄 Syncing %s -> %s ...\n", srcInput, destInput)
+		if dryRun {
+			fmt.Println("👀 This is a dry run, no files will be modified.")
+		}
+
+		if err := syncer.Sync(cmd.Context(), srcPath, destPath); err != nil {
+			return fmt.Errorf("sync failed: %w", err)
+		}
+
+		fmt.Println("✅ Sync completed.")
+		return nil
+	},
+}
+
+func init() {
+	syncCmd.Flags().Bool("dry-run", false, "Preview changes without executing")
+	syncCmd.Flags().Bool("delete", false, "Delete extra files in destination")
+	rootCmd.AddCommand(syncCmd)
+}
+
+
+/// --- ./cmd/user.go --- ///
+
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
+
+var userCmd = &cobra.Command{
+	Use:   "user",
+	Short: "Show user info",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		
+		info, err := driver.User(cmd.Context())
+		if err != nil {
+			return err
+		}
+		
+		return outputTableOrJSON(info, func() {
+			if name, ok := info["name"]; ok {
+				fmt.Printf("👤 Name: %v\n", name)
+			}
+			if used, ok := info["space_used"]; ok {
+				fmt.Printf("💾 Used: %s\n", formatSize(int64(used.(float64))))
+			}
+			if total, ok := info["space_total"]; ok {
+				fmt.Printf("📊 Total: %s\n", formatSize(int64(total.(float64))))
+			}
+		})
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(userCmd)
+}
+
+
+/// --- ./cmd/login.go --- ///
+
+package cmd
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/Ab-code520/cloud-cli/backends/quark"
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/mdp/qrterminal/v3"
+	"github.com/spf13/cobra"
+)
+
+var loginCmd = &cobra.Command{
+	Use:   "login [driver]",
+	Short: "Login to cloud drive (supports QR scan or manual cookie)",
+	Long: `Login to a cloud drive backend.
+
+Supported methods:
+  1. QR Scan (interactive): cloud-cli login quark
+  2. Manual Cookie:         cloud-cli login quark --cookie "your_cookie_string"
+
+Supported drivers: quark`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driverName := args[0]
+
+		cookie, err := cmd.Flags().GetString("cookie")
+		if err != nil {
+			return err
+		}
+
+		// Mode 1: QR Scan login (no cookie provided)
+		if cookie == "" {
+			return loginWithQR(cmd.Context(), driverName)
+		}
+
+		// Mode 2: Manual cookie login
+		return loginWithCookie(driverName, cookie)
+	},
+}
+
+// loginWithQR performs QR code based login.
+func loginWithQR(ctx context.Context, driverName string) error {
+	if driverName != "quark" {
+		return fmt.Errorf("QR login only supports 'quark' driver currently")
+	}
+
+	// Setup context with timeout (5 minutes)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	// Handle Ctrl+C gracefully
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	fmt.Println("🔐 Initializing QR login for Quark Drive...")
+
+	api := quark.NewAPI("")
+	qrResp, err := api.GenerateQR(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to generate QR code: %w", err)
+	}
+
+	fmt.Println("\n📱 Please scan the QR code with Quark app:")
+	fmt.Println("┌" + strings.Repeat("─", 39) + "┐")
+	
+	// Render QR code in terminal
+	qrterminal.GenerateHalfBlock(qrResp.URL, qrterminal.L, os.Stdout)
+
+	fmt.Println("└" + strings.Repeat("─", 39) + "┘")
+	fmt.Println("\nWaiting for scan confirmation... (timeout: 5 minutes)")
+
+	// Poll QR status
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	attempts := 0
+	maxAttempts := 150 // 5 minutes / 2 seconds
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("login cancelled: %w", ctx.Err())
+		case <-ticker.C:
+			attempts++
+			if attempts >= maxAttempts {
+				return fmt.Errorf("login timeout - QR code expired")
+			}
+
+			status, err := api.QueryQRStatus(ctx, qrResp.Token)
+			if err != nil {
+				fmt.Printf("\r⚠️  Polling error: %v", err)
+				continue
+			}
+
+			switch status.Status {
+			case quark.QRNotScanned:
+				fmt.Print("\r⏳ Waiting for scan...")
+			case quark.QRScanned:
+				fmt.Print("\r✅ QR scanned! Confirming login...")
+			case quark.QRConfirmed:
+				fmt.Println("\n🎉 Login confirmed!")
+
+				// Extract cookie from status response
+				cookie := extractCookie(status)
+				if cookie == "" {
+					return fmt.Errorf("login confirmed but no cookie received")
+				}
+
+				return loginWithCookie(driverName, cookie)
+			case quark.QRExpired:
+				fmt.Println("\n❌ QR code expired. Please try again.")
+				return fmt.Errorf("QR code expired")
+			default:
+				fmt.Printf("\r⚠️  Unknown status: %s", status.Status)
+			}
+		}
+	}
+}
+
+// extractCookie extracts cookie from QR query response.
+// Quark may return cookie in different fields depending on the API version.
+func extractCookie(status *quark.QRQueryResp) string {
+	// Direct cookie field
+	if status.Cookie != "" {
+		return status.Cookie
+	}
+	// If redirect_url contains ticket, we may need to extract it
+	// For now, return what we have
+	return ""
+}
+
+// loginWithCookie saves the cookie to config file.
+func loginWithCookie(driverName string, cookie string) error {
+	// Load or initialize config
+	cfg, err := core.LoadConfig("")
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	core.GlobalConfig = cfg
+
+	// Save account
+	acc := &core.Account{
+		Type: driverName,
+		Cookie: map[string]string{
+			"cookie": cookie,
+		},
+	}
+
+	accountName := driverName + "-default"
+	if err := core.GlobalConfig.AddAccount(accountName, acc); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	// Set as default
+	core.GlobalConfig.Default = accountName
+	if err := core.GlobalConfig.Save(); err != nil {
+		return fmt.Errorf("failed to update default: %w", err)
+	}
+
+	configPath := filepath.Join(os.Getenv("HOME"), ".config", "cloud-cli", "config.yaml")
+	fmt.Printf("✅ Logged in to %s successfully.\n", driverName)
+	fmt.Printf("📁 Config saved to: %s\n", configPath)
+	return nil
+}
+
+func init() {
+	loginCmd.Flags().StringP("cookie", "c", "", "Cookie string (skip QR login)")
+	rootCmd.AddCommand(loginCmd)
+}
+
+// Helper for string repeat (Go 1.21+)
+type stringRepeat int
+
+func (n stringRepeat) repeat() string {
+	return ""
+}
+
+
+/// --- ./cmd/move.go --- ///
+
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/spf13/cobra"
+)
+
+var moveCmd = &cobra.Command{
+	Use:   "move [source_id] [dest_dir_id]",
+	Short: "Move a file or folder to another directory",
+	Long: `Move a file or folder to another directory.
+
+Examples:
+  cloud-cli move file123 folder456   # Move file123 into folder456
+  cloud-cli move file123 0           # Move file123 to root directory`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		srcID := args[0]
+		destID := args[1]
+		
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		srcObj, err := driver.Info(cmd.Context(), srcID)
+		if err != nil {
+			return fmt.Errorf("get source info: %w", err)
+		}
+
+		destDirObj := &core.Object{ID: destID}
+		err = driver.Move(cmd.Context(), srcObj, destDirObj)
+		if err != nil {
+			return fmt.Errorf("move failed: %w", err)
+		}
+
+		fmt.Printf("✅ Successfully moved '%s' to directory '%s'\n", srcObj.Name, destID)
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(moveCmd)
+}
+
+
+/// --- ./cmd/quota.go --- ///
+
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/spf13/cobra"
+)
+
+var quotaCmd = &cobra.Command{
+	Use:   "quota",
+	Short: "Show cloud drive storage usage",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		qp, ok := driver.(core.QuotaProvider)
+		if !ok {
+			return fmt.Errorf("storage quota is not supported by this driver")
+		}
+
+		total, used, err := qp.Quota(cmd.Context())
+		if err != nil {
+			return err
+		}
+
+		data := map[string]interface{}{
+			"total_bytes": total,
+			"used_bytes":  used,
+			"free_bytes":  total - used,
+			"total_gb":    float64(total) / 1024 / 1024 / 1024,
+			"used_gb":     float64(used) / 1024 / 1024 / 1024,
+			"free_gb":     float64(total-used) / 1024 / 1024 / 1024,
+			"usage_pct":   float64(used) / float64(total) * 100,
+		}
+
+		return outputTableOrJSON(data, func() {
+			totalGB := float64(total) / 1024 / 1024 / 1024
+			usedGB := float64(used) / 1024 / 1024 / 1024
+			freeGB := totalGB - usedGB
+			usagePercent := float64(used) / float64(total) * 100
+
+			fmt.Println("💾 Cloud Drive Storage Usage")
+			fmt.Println("─────────────────────────────")
+			fmt.Printf("📊 Total:   %.2f GB\n", totalGB)
+			fmt.Printf("📦 Used:    %.2f GB (%.1f%%)\n", usedGB, usagePercent)
+			fmt.Printf("🆓 Free:    %.2f GB\n", freeGB)
+			fmt.Println("─────────────────────────────")
+
+			// Visual bar
+			barLen := 30
+			filled := int(usagePercent / 100 * float64(barLen))
+			if filled > barLen {
+				filled = barLen
+			}
+			fmt.Printf("[%s%s] %.1f%%\n",
+				repeatChar("█", filled),
+				repeatChar("░", barLen-filled),
+				usagePercent)
+		})
+	},
+}
+
+func repeatChar(s string, n int) string {
+	result := ""
+	for i := 0; i < n; i++ {
+		result += s
+	}
+	return result
+}
+
+func init() {
+	rootCmd.AddCommand(quotaCmd)
+}
+
+
+/// --- ./cmd/root.go --- ///
+
+package cmd
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/spf13/cobra"
+)
+
+var rootCmd = &cobra.Command{
+	Use:   "cloud-cli",
+	Short: "Universal Cloud Drive CLI",
+}
+
+func Execute() {
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func initDriver(name string, rootPath string) (core.Storage, error) {
+	if core.GlobalConfig == nil {
+		cfg, err := core.LoadConfig("")
+		if err != nil {
+			return nil, fmt.Errorf("load config: %w", err)
+		}
+		core.GlobalConfig = cfg
+	}
+
+	driver, err := core.NewDriver(name)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported driver '%s': %w", name, err)
+	}
+
+	var initCfg map[string]string
+
+	if name == "local" {
+		initCfg = map[string]string{
+			"root": rootPath,
+		}
+	} else {
+		// Load from config
+		// Try specific account name if provided, else default
+		// For simplicity, let's look for an account of this type
+		found := false
+		for _, accName := range core.GlobalConfig.ListAccounts() {
+			acc, _ := core.GlobalConfig.GetAccount(accName)
+			if acc.Type == name {
+				initCfg = make(map[string]string)
+				for k, v := range acc.Cookie {
+					initCfg[k] = v
+				}
+				for k, v := range acc.Params {
+					initCfg[k] = v
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("no account found for driver '%s'. Please login first.", name)
+		}
+	}
+
+	if err := driver.Init(initCfg); err != nil {
+		return nil, fmt.Errorf("init driver %s: %w", name, err)
+	}
+
+	return driver, nil
+}
+
+// parseResourcePath parses "driver:path" into (driver, path).
+// If no driver prefix, assumes "local".
+func parseResourcePath(input string) (string, string, error) {
+	// Split by first ":"
+	idx := strings.Index(input, ":")
+	if idx == -1 {
+		// No driver specified -> local
+		return "local", input, nil
+	}
+	
+	driver := input[:idx]
+	path := input[idx+1:]
+	
+	// Handle Windows paths like C:\... -> driver "C", path "\..."
+	if len(driver) == 1 && driver[0] >= 'A' && driver[0] <= 'Z' {
+		// Probably a Windows drive letter, treat as local
+		return "local", input, nil
+	}
+	if len(driver) == 1 && driver[0] >= 'a' && driver[0] <= 'z' {
+		 return "local", input, nil
+	}
+
+	return driver, path, nil
+}
+
+func getDriver() (core.Storage, error) {
+	if core.GlobalConfig == nil {
+		cfg, err := core.LoadConfig("")
+		if err != nil {
+			return nil, fmt.Errorf("load config: %w", err)
+		}
+		core.GlobalConfig = cfg
+	}
+
+	acc, err := core.GlobalConfig.GetDefaultAccount()
+	if err != nil {
+		return nil, fmt.Errorf("no default account selected, use 'login' or 'account switch' first")
+	}
+
+	return initDriver(acc.Type, "")
+}
+
+func init() {
+	rootCmd.PersistentFlags().StringVarP(&outputFormat, "output", "o", "table", "Output format: table, json")
+}
+
+
+/// --- ./cmd/upload.go --- ///
+
+package cmd
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/spf13/cobra"
+)
+
+var uploadCmd = &cobra.Command{
+	Use:   "upload [local_path...] [remote_dir_id]",
+	Short: "Upload file(s) to cloud drive",
+	Long: `Upload file(s) to cloud drive with optional policy control.
+
+Examples:
+  cloud-cli upload file.txt              # Upload to root
+  cloud-cli upload file.txt folder123    # Upload to specific folder
+  cloud-cli upload *.mp4 folder123       # Batch upload
+  cloud-cli upload file.txt --policy skip     # Skip if exists
+  cloud-cli upload file.txt --policy overwrite # Overwrite if exists
+  cloud-cli upload file.txt --policy rsync   # Upload only if modified`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		driver, err := getDriver()
+		if err != nil {
+			return err
+		}
+		defer driver.Close()
+
+		policy, _ := cmd.Flags().GetString("policy")
+		if policy != "skip" && policy != "overwrite" && policy != "rsync" {
+			policy = "skip" // Default policy
+		}
+
+		// Last arg is remote dir ID if it looks like an ID, otherwise root
+		remoteDirID := "0"
+		localPaths := args
+
+		// Check if last arg is a directory ID (alphanumeric)
+		if len(args) > 1 {
+			lastArg := args[len(args)-1]
+			if isValidDirID(lastArg) {
+				remoteDirID = lastArg
+				localPaths = args[:len(args)-1]
+			}
+		}
+
+		remoteDir := &core.Object{ID: remoteDirID, Name: "/", IsDir: true}
+
+		uploaded := 0
+		skipped := 0
+		failed := 0
+
+		for _, localPath := range localPaths {
+			// Handle glob patterns
+			matches, err := filepath.Glob(localPath)
+			if err != nil {
+				fmt.Printf("❌ Invalid pattern '%s': %v\n", localPath, err)
+				failed++
+				continue
+			}
+			if len(matches) == 0 {
+				matches = []string{localPath}
+			}
+
+			for _, path := range matches {
+				info, err := os.Stat(path)
+				if err != nil {
+					fmt.Printf("❌ Cannot access '%s': %v\n", path, err)
+					failed++
+					continue
+				}
+
+				if info.IsDir() {
+					fmt.Printf("⚠️ Skipping directory '%s' (use recursive upload flag in future)\n", path)
+					skipped++
+					continue
+				}
+
+				// Check policy
+				if policy == "skip" {
+					exists, err := fileExistsOnRemote(driver, cmd.Context(), remoteDirID, info.Name())
+					if err == nil && exists {
+						fmt.Printf("⏭️ Skipped '%s' (already exists)\n", info.Name())
+						skipped++
+						continue
+					}
+				}
+
+				f, err := os.Open(path)
+				if err != nil {
+					fmt.Printf("❌ Cannot open '%s': %v\n", path, err)
+					failed++
+					continue
+				}
+
+				fmt.Printf("⬆️ Uploading %s (%s)...\n", info.Name(), formatSize(info.Size()))
+
+				_, err = driver.Put(context.Background(), f, remoteDir, info.Name(), info.Size())
+				f.Close()
+
+				if err != nil {
+					fmt.Printf("❌ Failed to upload '%s': %v\n", info.Name(), err)
+					failed++
+				} else {
+					fmt.Printf("✅ Uploaded: %s\n", info.Name())
+					uploaded++
+				}
+			}
+		}
+
+		fmt.Printf("\n📊 Summary: %d uploaded, %d skipped, %d failed\n", uploaded, skipped, failed)
+		return nil
+	},
+}
+
+// isValidDirID checks if a string looks like a directory ID (alphanumeric, length 32+)
+func isValidDirID(s string) bool {
+	if len(s) < 10 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// fileExistsOnRemote checks if a file with the same name exists in the remote directory
+func fileExistsOnRemote(driver core.Storage, ctx context.Context, dirID, fileName string) (bool, error) {
+	objects, err := driver.List(ctx, dirID)
+	if err != nil {
+		return false, err
+	}
+	for _, obj := range objects {
+		if obj.Name == fileName && !obj.IsDir {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func init() {
+	uploadCmd.Flags().StringP("policy", "p", "skip", "Upload policy: skip|overwrite|rsync")
+	rootCmd.AddCommand(uploadCmd)
+}
+
+
+/// --- ./utils/progress.go --- ///
+
+package utils
+
+import (
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	KB = 1024
+	MB = 1024 * KB
+	GB = 1024 * MB
+)
+
+func FormatSize(bytes int64) string {
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.2f GB", float64(bytes)/GB)
+	case bytes >= MB:
+		return fmt.Sprintf("%.2f MB", float64(bytes)/MB)
+	case bytes >= KB:
+		return fmt.Sprintf("%.2f KB", float64(bytes)/KB)
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
+func FormatSpeed(bytesPerSec float64) string {
+	switch {
+	case bytesPerSec >= GB:
+		return fmt.Sprintf("%.2f GB/s", bytesPerSec/GB)
+	case bytesPerSec >= MB:
+		return fmt.Sprintf("%.2f MB/s", bytesPerSec/MB)
+	case bytesPerSec >= KB:
+		return fmt.Sprintf("%.2f KB/s", bytesPerSec/KB)
+	default:
+		return fmt.Sprintf("%.0f B/s", bytesPerSec)
+	}
+}
+
+func FormatDuration(d time.Duration) string {
+	if d < 0 {
+		return "0s"
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh%dm%ds", h, m, s)
+	} else if m > 0 {
+		return fmt.Sprintf("%dm%ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+type ProgressBar struct {
+	mu          sync.Mutex
+	total       int64
+	current     int64
+	startTime   time.Time
+	lastUpdate  time.Time
+	lastCurrent int64
+	speed       float64
+	width       int
+}
+
+func NewProgressBar(total int64, width int) *ProgressBar {
+	return &ProgressBar{
+		total:     total,
+		width:     width,
+		startTime: time.Now(),
+		lastUpdate: time.Now(),
+	}
+}
+
+func (pb *ProgressBar) Update(current int64) {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	pb.current = current
+	now := time.Now()
+	elapsed := now.Sub(pb.startTime).Seconds()
+
+	if elapsed > 0 {
+		deltaT := now.Sub(pb.lastUpdate).Seconds()
+		if deltaT > 0 {
+			pb.speed = float64(current-pb.lastCurrent) / deltaT
+		} else {
+			pb.speed = float64(current) / elapsed
+		}
+	}
+
+	pb.lastUpdate = now
+	pb.lastCurrent = current
+}
+
+func (pb *ProgressBar) Render() string {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	percent := float64(pb.current) / float64(pb.total) * 100
+	if percent > 100 {
+		percent = 100
+	}
+
+	filled := int(float64(pb.width) * percent / 100)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", pb.width-filled)
+
+	remaining := time.Duration(float64(pb.total-pb.current)/pb.speed) * time.Second
+
+	return fmt.Sprintf(" %s %6.1f%% %s/s [%s/%s] ETA:%s",
+		bar, percent,
+		FormatSpeed(pb.speed),
+		FormatSize(pb.current),
+		FormatSize(pb.total),
+		FormatDuration(remaining),
+	)
+}
+
+
+/// --- ./utils/validation.go --- ///
+
+package utils
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// ValidationError represents a validation failure.
+type ValidationError struct {
+	Field   string
+	Message string
+}
+
+func (e *ValidationError) Error() string {
+	if e.Field != "" {
+		return fmt.Sprintf("validation error: %s: %s", e.Field, e.Message)
+	}
+	return fmt.Sprintf("validation error: %s", e.Message)
+}
+
+// Validator provides a fluent API for input validation.
+type Validator struct {
+	errors []ValidationError
+}
+
+// NewValidator creates a new validator.
+func NewValidator() *Validator {
+	return &Validator{}
+}
+
+// Required checks that a string is not empty.
+func (v *Validator) Required(field, value string) *Validator {
+	if strings.TrimSpace(value) == "" {
+		v.errors = append(v.errors, ValidationError{
+			Field:   field,
+			Message: "is required",
+		})
+	}
+	return v
+}
+
+// NonEmptyPath checks that a path is valid and not empty.
+func (v *Validator) NonEmptyPath(field, path string) *Validator {
+	if strings.TrimSpace(path) == "" {
+		v.errors = append(v.errors, ValidationError{
+			Field:   field,
+			Message: "path is required",
+		})
+		return v
+	}
+
+	// Check for null bytes
+	if strings.ContainsRune(path, 0x00) {
+		v.errors = append(v.errors, ValidationError{
+			Field:   field,
+			Message: "path contains null bytes",
+		})
+	}
+
+	// Clean and validate path separators
+	cleaned := filepath.Clean(path)
+	if cleaned == "." {
+		// Root path is valid
+	}
+
+	return v
+}
+
+// FileExists checks that a local file exists and is readable.
+func (v *Validator) FileExists(field, path string) *Validator {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			v.errors = append(v.errors, ValidationError{
+				Field:   field,
+				Message: fmt.Sprintf("file not found: %s", path),
+			})
+		} else {
+			v.errors = append(v.errors, ValidationError{
+				Field:   field,
+				Message: fmt.Sprintf("cannot access file: %s", err),
+			})
+		}
+		return v
+	}
+
+	if info.IsDir() {
+		v.errors = append(v.errors, ValidationError{
+			Field:   field,
+			Message: "expected a file, got a directory",
+		})
+	}
+
+	return v
+}
+
+// RangeInt checks that an integer is within a range.
+func (v *Validator) RangeInt(field string, value, min, max int) *Validator {
+	if value < min || value > max {
+		v.errors = append(v.errors, ValidationError{
+			Field:   field,
+			Message: fmt.Sprintf("must be between %d and %d, got %d", min, max, value),
+		})
+	}
+	return v
+}
+
+// OneOf checks that a value is one of the allowed values.
+func (v *Validator) OneOf(field, value string, allowed ...string) *Validator {
+	for _, a := range allowed {
+		if value == a {
+			return v
+		}
+	}
+	v.errors = append(v.errors, ValidationError{
+		Field:   field,
+		Message: fmt.Sprintf("must be one of: %s", strings.Join(allowed, ", ")),
+	})
+	return v
+}
+
+// Validate returns the first validation error, or nil if all passed.
+func (v *Validator) Validate() error {
+	if len(v.errors) > 0 {
+		return &v.errors[0]
+	}
+	return nil
+}
+
+// ValidateAll returns all validation errors combined.
+func (v *Validator) ValidateAll() error {
+	if len(v.errors) == 0 {
+		return nil
+	}
+	if len(v.errors) == 1 {
+		return &v.errors[0]
+	}
+	msgs := make([]string, len(v.errors))
+	for i, e := range v.errors {
+		msgs[i] = e.Error()
+	}
+	return fmt.Errorf("multiple validation errors:\n  - %s", strings.Join(msgs, "\n  - "))
+}
+
+
+/// --- ./utils/security.go --- ///
+
+package utils
+
+import (
+	"net"
+	"net/url"
+)
+
+// IsURLSafe checks if a URL is safe to connect to (no SSRF).
+func IsURLSafe(rawURL string) (bool, string) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false, "invalid URL"
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false, "unsupported scheme"
+	}
+
+	host := u.Hostname()
+	blocked := []string{"localhost", "127.0.0.1", "::1", "0.0.0.0", "metadata.google.internal"}
+	for _, b := range blocked {
+		if host == b {
+			return false, "blocked host: " + host
+		}
+	}
+
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return false, "DNS lookup failed"
+	}
+	for _, ip := range ips {
+		if ip.IsPrivate() || ip.IsLoopback() {
+			return false, "private IP blocked: " + ip.String()
+		}
+	}
+	return true, ""
+}
+
+
+/// --- ./utils/hash.go --- ///
+
+package utils
+
+import (
+	"crypto/sha1"
+	"encoding/hex"
+	"io"
+	"os"
+)
+
+// CalcFileSHA1 calculates SHA1 of a file using streaming (low memory).
+func CalcFileSHA1(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	return CalcReaderSHA1(f)
+}
+
+// CalcReaderSHA1 calculates SHA1 of a reader using streaming.
+func CalcReaderSHA1(reader io.Reader) (string, error) {
+	h := sha1.New()
+	if _, err := io.Copy(h, reader); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+
+/// --- ./utils/pool.go --- ///
+
+package utils
+
+import (
+	"context"
+	"sync"
+)
+
+// Pool manages a pool of concurrent workers with context cancellation.
+type Pool struct {
+	sem    chan struct{}
+	wg     sync.WaitGroup
+	mu     sync.Mutex
+	err    error
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// NewPool creates a new worker pool.
+func NewPool(concurrency int) *Pool {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Pool{
+		sem:    make(chan struct{}, concurrency),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+}
+
+// Go runs the function in the worker pool.
+func (p *Pool) Go(fn func(ctx context.Context) error) {
+	p.wg.Add(1)
+	p.sem <- struct{}{} // Acquire semaphore
+
+	go func() {
+		defer p.wg.Done()
+		defer func() { <-p.sem }() // Release semaphore
+
+		if p.ctx.Err() != nil {
+			return
+		}
+
+		if err := fn(p.ctx); err != nil {
+			p.mu.Lock()
+			if p.err == nil {
+				p.err = err
+				p.cancel() // Cancel pool to stop other tasks
+			}
+			p.mu.Unlock()
+		}
+	}()
+}
+
+// Wait blocks until all workers complete.
+func (p *Pool) Wait() error {
+	p.wg.Wait()
+	p.cancel() // Ensure cleanup
+	return p.err
+}
+
+
+/// --- ./main.go --- ///
+
+package main
+
+import "github.com/Ab-code520/cloud-cli/cmd"
+
+// 导入所有后端驱动
+import (
+	_ "github.com/Ab-code520/cloud-cli/backends/local"
+	_ "github.com/Ab-code520/cloud-cli/backends/quark"
+)
+
+func main() {
+	cmd.Execute()
+}
+
+
+/// --- ./go.mod --- ///
+
+module github.com/Ab-code520/cloud-cli
+
+go 1.21
+
+require (
+	github.com/mdp/qrterminal/v3 v3.2.1
+	github.com/spf13/cobra v1.8.0
+)
+
+require (
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/spf13/pflag v1.0.5 // indirect
+	golang.org/x/sys v0.29.0 // indirect
+	golang.org/x/term v0.13.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+	rsc.io/qr v0.2.0 // indirect
+)
+
+
+/// --- ./core/registry.go --- ///
+
+package core
+
+import "fmt"
+
+var drivers = make(map[string]func() Storage)
+
+// Register adds a driver factory to the registry.
+func Register(name string, factory func() Storage) {
+	drivers[name] = factory
+}
+
+// NewDriver creates a new instance of the named driver.
+func NewDriver(name string) (Storage, error) {
+	f, ok := drivers[name]
+	if !ok {
+		return nil, fmt.Errorf("driver '%s' not registered", name)
+	}
+	return f(), nil
+}
+
+// ListDrivers returns all registered driver names.
+func ListDrivers() []string {
+	names := make([]string, 0, len(drivers))
+	for name := range drivers {
+		names = append(names, name)
+	}
+	return names
+}
+
+
+/// --- ./core/config.go --- ///
+
+package core
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Config represents the global configuration for cloud-cli.
+type Config struct {
+	mu       sync.RWMutex
+	path     string
+	Default  string            `yaml:"default"`
+	Accounts map[string]*Account `yaml:"accounts"`
+	Settings Settings           `yaml:"settings"`
+}
+
+// Account represents a single cloud drive account configuration.
+type Account struct {
+	Type   string            `yaml:"type"`
+	Cookie map[string]string `yaml:"cookie"`
+	Params map[string]string `yaml:"params,omitempty"`
+}
+
+// Settings represents global CLI settings.
+type Settings struct {
+	SpeedLimit string `yaml:"speed_limit"`
+	Retries    int    `yaml:"retries"`
+	Timeout    int    `yaml:"timeout"`
+}
+
+// GlobalConfig is the singleton configuration instance.
+var (
+	GlobalConfig *Config
+	configOnce   sync.Once
+)
+
+// LoadConfig loads the configuration from the given path or default location.
+func LoadConfig(path string) (*Config, error) {
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get home dir: %w", err)
+		}
+		path = filepath.Join(home, ".config", "cloud-cli", "config.yaml")
+	}
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create config dir: %w", err)
+	}
+
+	cfg := &Config{
+		path:     path,
+		Accounts: make(map[string]*Account),
+		Settings: Settings{
+			SpeedLimit: "0", // 0 means no limit
+			Retries:    3,
+			Timeout:    60,
+		},
+	}
+
+	// Try to read existing config
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Create default config if not exists
+			cfg.Default = "default"
+			cfg.Accounts["default"] = &Account{
+				Type:   "quark",
+				Cookie: make(map[string]string),
+			}
+			if err := cfg.Save(); err != nil {
+				return nil, fmt.Errorf("failed to save default config: %w", err)
+			}
+			return cfg, nil
+		}
+		return nil, fmt.Errorf("failed to read config: %w", err)
+	}
+
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse config: %w", err)
+	}
+
+	if cfg.Accounts == nil {
+		cfg.Accounts = make(map[string]*Account)
+	}
+
+	return cfg, nil
+}
+
+// Save saves the current configuration to disk.
+func (c *Config) Save() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	// Write atomically
+	tmpPath := c.path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write temp config: %w", err)
+	}
+
+	return os.Rename(tmpPath, c.path)
+}
+
+// GetAccount returns the configuration for a specific account name.
+func (c *Config) GetAccount(name string) (*Account, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if name == "" {
+		name = c.Default
+	}
+
+	acc, ok := c.Accounts[name]
+	if !ok {
+		return nil, fmt.Errorf("account '%s' not found", name)
+	}
+
+	return acc, nil
+}
+
+// AddAccount adds or updates an account configuration.
+func (c *Config) AddAccount(name string, acc *Account) error {
+	c.mu.Lock()
+	c.Accounts[name] = acc
+	c.mu.Unlock()
+
+	return c.Save()
+}
+
+// RemoveAccount removes an account configuration.
+func (c *Config) RemoveAccount(name string) error {
+	c.mu.Lock()
+	delete(c.Accounts, name)
+	if c.Default == name && len(c.Accounts) > 0 {
+		// Set a new default
+		for k := range c.Accounts {
+			c.Default = k
+			break
+		}
+	}
+	c.mu.Unlock()
+
+	return c.Save()
+}
+
+// ListAccounts returns a list of all configured account names.
+func (c *Config) ListAccounts() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	names := make([]string, 0, len(c.Accounts))
+	for name := range c.Accounts {
+		names = append(names, name)
+	}
+	return names
+}
+
+// GetDefaultAccount returns the default account.
+func (c *Config) GetDefaultAccount() (*Account, error) {
+	return c.GetAccount("")
+}
+
+
+/// --- ./core/fs.go --- ///
+
+package core
+
+import (
+	"context"
+	"io"
+	"time"
+)
+
+// Object represents a unified file/directory object across all cloud providers.
+type Object struct {
+	ID      string    `json:"id"`
+	Name    string    `json:"name"`
+	Size    int64     `json:"size"`
+	IsDir   bool      `json:"is_dir"`
+	ModTime time.Time `json:"mod_time"`
+	Path    string    `json:"path"`
+	Hash    string    `json:"hash,omitempty"`
+	RawData interface{} `json:"-"`
+}
+
+// UploadPartInfo stores info about a single uploaded chunk.
+type UploadPartInfo struct {
+	PartNumber int    `json:"part_number"`
+	ETag       string `json:"etag"`
+	Size       int64  `json:"size"`
+}
+
+// UploadState represents the resumable upload checkpoint.
+type UploadState struct {
+	FilePath      string           `json:"file_path"`
+	DestPath      string           `json:"dest_path"`
+	TotalSize     int64            `json:"total_size"`
+	PartSize      int64            `json:"part_size"`
+	UploadedParts []UploadPartInfo `json:"uploaded_parts"`
+	UploadID      string           `json:"upload_id"`
+	CreatedAt     time.Time        `json:"created_at"`
+}
+
+// ShareInfo holds metadata about a shared file/folder.
+type ShareInfo struct {
+	ShareID   string
+	URL       string
+	Title     string
+	IsExpired bool
+	FileCount int
+	CreatedAt int64
+}
+
+// RecycleItem holds metadata about an item in the recycle bin.
+type RecycleItem struct {
+	FID        string
+	FileName   string
+	Size       int64
+	IsDir      bool
+	DeletedAt  int64
+}
+
+// ─────────────────────────────────────────────────────────────
+// Base Interface: Every cloud drive MUST implement this.
+// ─────────────────────────────────────────────────────────────
+type Storage interface {
+	// Name returns the driver name.
+	Name() string
+
+	// Init initializes the driver with configuration.
+	Init(cfg map[string]string) error
+
+	// User returns account information.
+	User(ctx context.Context) (map[string]interface{}, error)
+
+	// List returns objects in a directory.
+	List(ctx context.Context, pathOrID string) ([]*Object, error)
+
+	// Open opens a remote file for reading (supports Range requests for resuming).
+	Open(ctx context.Context, obj *Object, offset int64) (io.ReadCloser, error)
+
+	// Put uploads data to a remote directory (supports streaming via io.Reader).
+	Put(ctx context.Context, in io.Reader, remoteDir *Object, name string, size int64) (*Object, error)
+
+	// Delete removes an object.
+	Delete(ctx context.Context, obj *Object) error
+
+	// Move moves an object.
+	Move(ctx context.Context, src *Object, destDir *Object) error
+
+	// Rename renames an object.
+	Rename(ctx context.Context, obj *Object, newName string) error
+
+	// Mkdir creates a directory.
+	Mkdir(ctx context.Context, pathOrID string) (*Object, error)
+
+	// Info retrieves detailed metadata for a specific file/folder.
+	Info(ctx context.Context, pathOrID string) (*Object, error)
+
+	// Copy copies a file/folder to a destination directory.
+	Copy(ctx context.Context, src *Object, destDir *Object) error
+
+	// Close releases any resources held by the driver.
+	Close() error
+}
+
+// ─────────────────────────────────────────────────────────────
+// Extension Interfaces: Capabilities that are optional.
+// Drivers implement only what they support.
+// ─────────────────────────────────────────────────────────────
+
+// Sharable represents the capability to create and manage shares.
+type Sharable interface {
+	CreateShare(ctx context.Context, fileIDs []string, expiredDay int) (shareURL string, err error)
+	ListShares(ctx context.Context, page, size int) ([]ShareInfo, error)
+	DeleteShare(ctx context.Context, shareIDs []string) error
+}
+
+// Searchable represents the capability to search files.
+type Searchable interface {
+	Search(ctx context.Context, query, pdirFid string, page, size int) ([]*Object, error)
+}
+
+// QuotaProvider represents the capability to check storage usage.
+type QuotaProvider interface {
+	Quota(ctx context.Context) (total, used int64, err error)
+}
+
+// RecycleBin represents the capability to manage a recycle bin.
+type RecycleBin interface {
+	ListRecycle(ctx context.Context, page, size int) ([]RecycleItem, error)
+	RecoverRecycle(ctx context.Context, fids []string) error
+	DeleteRecycle(ctx context.Context, fids []string) error
+}
+
+// OfflineDownloader represents the capability to add offline download tasks.
+type OfflineDownloader interface {
+	AddOfflineTask(ctx context.Context, url string) error
+}
+
+
+/// --- ./core/sync.go --- ///
+
+package core
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"time"
+)
+
+// SyncAction represents an action to be taken during sync.
+type SyncAction struct {
+	Type   string // "upload", "delete", "update", "skip"
+	Object *Object
+	Reason string
+}
+
+// SyncConfig holds the configuration for a sync operation.
+type SyncConfig struct {
+	// DeleteExtra deletes files in Dest that are not in Source.
+	DeleteExtra bool
+	// DryRun shows what would be done without executing.
+	DryRun bool
+	// MaxAge skips files older than this duration.
+	MaxAge time.Duration
+}
+
+// Syncer performs directory synchronization between two Storage backends.
+type Syncer struct {
+	Source Storage
+	Dest   Storage
+	Config SyncConfig
+	
+	// Callbacks
+	OnAction func(action *SyncAction)
+}
+
+// Sync performs the synchronization.
+func (s *Syncer) Sync(ctx context.Context, srcPath, destPath string) error {
+	// 1. List Source
+	srcFiles, err := s.Source.List(ctx, srcPath)
+	if err != nil {
+		return fmt.Errorf("list source: %w", err)
+	}
+
+	// 2. List Dest
+	destFiles, err := s.Dest.List(ctx, destPath)
+	if err != nil {
+		// If dest doesn't exist, we might need to create it?
+		// Or it's an error.
+		return fmt.Errorf("list dest: %w", err)
+	}
+
+	// 3. Build maps
+	srcMap := make(map[string]*Object)
+	for _, f := range srcFiles {
+		srcMap[f.Name] = f
+	}
+
+	destMap := make(map[string]*Object)
+	for _, f := range destFiles {
+		destMap[f.Name] = f
+	}
+
+	// 4. Compare: Source -> Dest (Upload/Update)
+	for _, srcObj := range srcFiles {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		destObj, exists := destMap[srcObj.Name]
+		relativeDest := filepath.Join(destPath, srcObj.Name)
+
+		if srcObj.IsDir {
+			// Recursively sync directories
+			// Ensure dest dir exists
+			if !exists {
+				if s.Config.DryRun {
+					s.reportAction(&SyncAction{Type: "mkdir", Object: srcObj, Reason: "Directory missing in dest"})
+				} else {
+					_, _ = s.Dest.Mkdir(ctx, relativeDest)
+				}
+			}
+			
+			// Sync content
+			if err := s.Sync(ctx, filepath.Join(srcPath, srcObj.Name), relativeDest); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if !exists {
+			// New file
+			s.reportAction(&SyncAction{Type: "upload", Object: srcObj, Reason: "New file"})
+			if !s.Config.DryRun {
+				if err := s.uploadFile(ctx, srcObj, srcPath, destPath); err != nil {
+					return fmt.Errorf("upload %s: %w", srcObj.Name, err)
+				}
+			}
+		} else {
+			// File exists, check if update needed
+			// Simple comparison: Size or ModTime
+			// Note: ModTime precision might differ.
+			if s.needsUpdate(srcObj, destObj) {
+				s.reportAction(&SyncAction{Type: "update", Object: srcObj, Reason: "Modified"})
+				if !s.Config.DryRun {
+					if err := s.uploadFile(ctx, srcObj, srcPath, destPath); err != nil {
+						return fmt.Errorf("update %s: %w", srcObj.Name, err)
+					}
+				}
+			} else {
+				s.reportAction(&SyncAction{Type: "skip", Object: srcObj, Reason: "Up to date"})
+			}
+		}
+	}
+
+	// 5. Compare: Dest -> Source (Delete extra)
+	if s.Config.DeleteExtra {
+		for _, destObj := range destFiles {
+			if _, exists := srcMap[destObj.Name]; !exists {
+				s.reportAction(&SyncAction{Type: "delete", Object: destObj, Reason: "Extra file in dest"})
+				if !s.Config.DryRun {
+					if err := s.Dest.Delete(ctx, &Object{
+						Path: filepath.Join(destPath, destObj.Name),
+						IsDir: destObj.IsDir,
+					}); err != nil {
+						return fmt.Errorf("delete %s: %w", destObj.Name, err)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// needsUpdate returns true if srcObj should overwrite destObj.
+func (s *Syncer) needsUpdate(src, dest *Object) bool {
+	if src.Size != dest.Size {
+		return true
+	}
+	// Allow 2 seconds drift for timestamp inaccuracies
+	diff := src.ModTime.Sub(dest.ModTime)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff > 2*time.Second
+}
+
+func (s *Syncer) uploadFile(ctx context.Context, srcObj *Object, srcDir, destDir string) error {
+	// Open source
+	reader, err := s.Source.Open(ctx, srcObj, 0)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	// Upload to dest
+	_, err = s.Dest.Put(ctx, reader, &Object{Path: destDir, IsDir: true}, srcObj.Name, srcObj.Size)
+	return err
+}
+
+func (s *Syncer) reportAction(action *SyncAction) {
+	if s.OnAction != nil {
+		s.OnAction(action)
+	}
+}
+
+
+/// --- ./core/transfer.go --- ///
+
+package core
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"time"
+)
+
+// TransferStats tracks the progress of a file transfer.
+type TransferStats struct {
+	FileName    string
+	TotalSize   int64
+	Transferred int64
+	Speed       float64 // bytes per second
+	StartTime   time.Time
+	EndTime     time.Time
+	Err         error
+}
+
+// TransferOption configures a transfer operation.
+type TransferOption func(t *Transferer)
+
+// Transferer handles streaming file transfers between two different Storage backends.
+type Transferer struct {
+	// Progress callback
+	OnProgress func(stats *TransferStats)
+	// Buffer size for io.Copy
+	BufferSize int
+}
+
+// NewTransferer creates a new Transferer with defaults.
+func NewTransferer(opts ...TransferOption) *Transferer {
+	t := &Transferer{
+		BufferSize: 32 * 1024, // 32KB default buffer
+	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
+}
+
+// Transfer copies a single file from src to dest.
+func (t *Transferer) Transfer(ctx context.Context, src Storage, dest Storage, srcPath, destPath string) error {
+	stats := &TransferStats{
+		FileName:  filepath.Base(srcPath),
+		StartTime: time.Now(),
+	}
+	defer func() {
+		stats.EndTime = time.Now()
+		if t.OnProgress != nil {
+			t.OnProgress(stats)
+		}
+	}()
+
+	// 1. Get source file info (to know size)
+	srcInfo, err := src.Info(ctx, srcPath)
+	if err != nil {
+		stats.Err = fmt.Errorf("get source info: %w", err)
+		return stats.Err
+	}
+	stats.TotalSize = srcInfo.Size
+
+	// 2. Open source stream
+	reader, err := src.Open(ctx, srcInfo, 0)
+	if err != nil {
+		stats.Err = fmt.Errorf("open source: %w", err)
+		return stats.Err
+	}
+	defer reader.Close()
+
+	// 3. Determine destination directory and filename
+	destDirPath := filepath.Dir(destPath)
+	destFileName := filepath.Base(destPath)
+
+	// Ensure destination directory exists
+	// For cloud drivers, this usually means Mkdir
+	destDirInfo, err := dest.Mkdir(ctx, destDirPath)
+	if err != nil {
+		// If Mkdir fails because it exists or other reason, try to ignore if it's not critical
+		// But standard behavior: Mkdir should be idempotent or return error if fails.
+		// Let's assume Mkdir handles existence or we need to check.
+		// For now, if error, we might fail.
+		// Improved logic: Check if dir exists via Info?
+		// Let's trust Mkdir implementation or handle error.
+		// If it returns error "exists", that's usually fine.
+	}
+	_ = destDirInfo
+
+	// 4. Upload to destination
+	_, err = dest.Put(ctx, reader, &Object{Path: destDirPath, IsDir: true}, destFileName, stats.TotalSize)
+	if err != nil {
+		stats.Err = fmt.Errorf("put to dest: %w", err)
+		return stats.Err
+	}
+
+	stats.Transferred = stats.TotalSize
+	return nil
+}
+
+// TransferDir copies a directory recursively.
+func (t *Transferer) TransferDir(ctx context.Context, src Storage, dest Storage, srcPath, destPath string, concurrency int) error {
+	// 1. List source recursively (simplified)
+	// In a real implementation, we need a recursive lister.
+	// For now, let's assume single level or use a helper.
+	
+	// Let's implement a simple recursive walker.
+	return t.transferDirRecursive(ctx, src, dest, srcPath, destPath)
+}
+
+func (t *Transferer) transferDirRecursive(ctx context.Context, src Storage, dest Storage, srcPath, destPath string) error {
+	// List current level
+	items, err := src.List(ctx, srcPath)
+	if err != nil {
+		return fmt.Errorf("list %s: %w", srcPath, err)
+	}
+
+	// Ensure dest dir exists
+	_, _ = dest.Mkdir(ctx, destPath)
+
+	for _, item := range items {
+		// Construct relative paths
+		itemSrcPath := filepath.Join(srcPath, item.Name)
+		itemDestPath := filepath.Join(destPath, item.Name)
+
+		if item.IsDir {
+			// Recurse
+			if err := t.transferDirRecursive(ctx, src, dest, itemSrcPath, itemDestPath); err != nil {
+				return err
+			}
+		} else {
+			// Transfer file
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				fmt.Printf("📄 %s -> %s\n", item.Name, destPath)
+				if err := t.Transfer(ctx, src, dest, itemSrcPath, itemDestPath); err != nil {
+					return fmt.Errorf("transfer %s: %w", item.Name, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+
+/// --- ./backends/local/driver.go --- ///
+
+package local
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
+	"github.com/Ab-code520/cloud-cli/core"
+)
+
+// Driver implements core.Storage for the local filesystem.
+// This allows treating the local disk as a cloud backend, enabling
+// seamless sync and transfer between any two Storage implementations.
+type Driver struct {
+	root string
+}
+
+func NewDriver() core.Storage {
+	return &Driver{}
+}
+
+func init() {
+	core.Register("local", NewDriver)
+}
+
+func (d *Driver) Name() string { return "local" }
+
+// Init expects a "root" key in cfg to set the base directory.
+func (d *Driver) Init(cfg map[string]string) error {
+	root := cfg["root"]
+	if root == "" {
+		// Default to current directory if not specified
+		var err error
+		root, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("failed to get current directory: %w", err)
+		}
+	}
+	// Clean the root path
+	d.root = filepath.Clean(root)
+	
+	// Ensure root exists
+	if err := os.MkdirAll(d.root, 0755); err != nil {
+		return fmt.Errorf("failed to create root directory %s: %w", d.root, err)
+	}
+	return nil
+}
+
+func (d *Driver) Close() error { return nil }
+
+func (d *Driver) User(ctx context.Context) (map[string]interface{}, error) {
+	hostname, _ := os.Hostname()
+	return map[string]interface{}{
+		"type":     "Local Filesystem",
+		"hostname": hostname,
+		"root":     d.root,
+	}, nil
+}
+
+// resolvePath converts a relative path (from the CLI perspective) to an absolute OS path.
+func (d *Driver) resolvePath(relPath string) string {
+	// The relPath passed by the CLI is usually relative to the "root" or absolute.
+	// For "local" driver used in sync, we often treat the argument as a path relative to root
+	// OR if the user provided an absolute path in config, we append to it.
+	
+	// However, standard behavior for "local" backend in rclone-like tools:
+	// root = "/home/user"
+	// path = "docs" -> "/home/user/docs"
+	
+	clean := filepath.Clean(relPath)
+	if filepath.IsAbs(clean) {
+		// If the provided path is absolute, we check if it's inside root.
+		// For flexibility in CLI, we might just use it as is, or strictly enforce root.
+		// Let's strictly enforce root for security/consistency.
+		if !filepath.HasPrefix(clean, d.root) {
+			// In some CLI usage, users might pass absolute paths directly to the driver init,
+			// but here let's assume 'root' is the base.
+			// If the path passed to List/Open is absolute, it might override root?
+			// Let's stick to: path is relative to root.
+			// Exception: if path is exactly d.root, use it.
+		}
+		return filepath.Join(d.root, clean)
+	}
+	return filepath.Join(d.root, clean)
+}
+
+func (d *Driver) List(ctx context.Context, pathOrID string) ([]*core.Object, error) {
+	absPath := d.resolvePath(pathOrID)
+	
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("read dir %s: %w", absPath, err)
+	}
+
+	var objects []*core.Object
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		
+		// Skip hidden files? Maybe add an option later.
+		
+		obj := &core.Object{
+			// ID is the full absolute path for local files
+			ID:      info.Name(), // Relative to the listed dir
+			Name:    info.Name(),
+			Size:    info.Size(),
+			IsDir:   entry.IsDir(),
+			ModTime: info.ModTime(),
+			Path:    filepath.Join(pathOrID, info.Name()), // Relative path for CLI usage
+		}
+		objects = append(objects, obj)
+	}
+	return objects, nil
+}
+
+func (d *Driver) Open(ctx context.Context, obj *core.Object, offset int64) (io.ReadCloser, error) {
+	// obj.Path should be relative to root.
+	absPath := d.resolvePath(obj.Path)
+	
+	f, err := os.Open(absPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
+
+	return f, nil
+}
+
+func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, name string, size int64) (*core.Object, error) {
+	dirPath := d.resolvePath(remoteDir.Path)
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", dirPath, err)
+	}
+
+	destPath := filepath.Join(dirPath, name)
+	
+	// Check for existing file to support resume/skip? 
+	// Basic implementation: create/truncate.
+	f, err := os.Create(destPath)
+	if err != nil {
+		return nil, fmt.Errorf("create file %s: %w", destPath, err)
+	}
+	defer f.Close()
+
+	written, err := io.Copy(f, in)
+	if err != nil {
+		// Partial cleanup?
+		os.Remove(destPath)
+		return nil, fmt.Errorf("write file %s: %w", destPath, err)
+	}
+	
+	// Update mod time if needed?
+	
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	return &core.Object{
+		ID:      info.Name(),
+		Name:    name,
+		Size:    written, // Use actual written size
+		IsDir:   false,
+		ModTime: info.ModTime(),
+		Path:    filepath.Join(remoteDir.Path, name),
+	}, nil
+}
+
+func (d *Driver) Delete(ctx context.Context, obj *core.Object) error {
+	absPath := d.resolvePath(obj.Path)
+	if obj.IsDir {
+		return os.RemoveAll(absPath)
+	}
+	return os.Remove(absPath)
+}
+
+func (d *Driver) Move(ctx context.Context, src *core.Object, destDir *core.Object) error {
+	srcPath := d.resolvePath(src.Path)
+	destPath := filepath.Join(d.resolvePath(destDir.Path), src.Name)
+	return os.Rename(srcPath, destPath)
+}
+
+func (d *Driver) Rename(ctx context.Context, obj *core.Object, newName string) error {
+	srcPath := d.resolvePath(obj.Path)
+	destPath := filepath.Join(filepath.Dir(srcPath), newName)
+	return os.Rename(srcPath, destPath)
+}
+
+func (d *Driver) Mkdir(ctx context.Context, pathOrID string) (*core.Object, error) {
+	absPath := d.resolvePath(pathOrID)
+	if err := os.MkdirAll(absPath, 0755); err != nil {
+		return nil, err
+	}
+	info, _ := os.Stat(absPath)
+	return &core.Object{
+		ID:      filepath.Base(absPath),
+		Name:    filepath.Base(absPath),
+		IsDir:   true,
+		ModTime: info.ModTime(),
+		Path:    pathOrID,
+	}, nil
+}
+
+func (d *Driver) Info(ctx context.Context, pathOrID string) (*core.Object, error) {
+	absPath := d.resolvePath(pathOrID)
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil, err
+	}
+	return &core.Object{
+		ID:      info.Name(),
+		Name:    info.Name(),
+		Size:    info.Size(),
+		IsDir:   info.IsDir(),
+		ModTime: info.ModTime(),
+		Path:    pathOrID,
+	}, nil
+}
+
+func (d *Driver) Copy(ctx context.Context, src *core.Object, destDir *core.Object) error {
+	// Local copy is tricky if we just use cp.
+	// But standard "Copy" in cloud usually means server-side copy.
+	// For local, we can implement file copying, but let's skip for now 
+	// or just use the Transfer engine which uses Open->Put.
+	return fmt.Errorf("local copy (server-side) not supported, use transfer/sync")
+}
+
+// LocalFS doesn't support cloud-specific features.
+
+
+/// --- ./backends/quark/api.go --- ///
+
+package quark
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/Ab-code520/cloud-cli/utils"
+)
+
+const (
+	baseURL      = "https://drive-pc.quark.cn"
+	apiPrecreate = "/1/clouddrive/file/upload/pre"
+	apiAuth      = "/1/clouddrive/file/upload/auth"
+	apiFinish    = "/1/clouddrive/file/upload/finish"
+	apiList      = "/1/clouddrive/file/sort"
+	apiDownload  = "/1/clouddrive/file/download"
+)
+
+type QuarkAPI struct {
+	client  *http.Client
+	cookie  string
+	cookies map[string]string
+}
+
+func NewAPI(cookie string) *QuarkAPI {
+	cookies := make(map[string]string)
+	for _, pair := range strings.Split(cookie, ";") {
+		pair = strings.TrimSpace(pair)
+		if idx := strings.Index(pair, "="); idx > 0 {
+			cookies[pair[:idx]] = pair[idx+1:]
+		}
+	}
+	return &QuarkAPI{
+		client:  &http.Client{Timeout: 60 * time.Second},
+		cookie:  cookie,
+		cookies: cookies,
+	}
+}
+
+func (a *QuarkAPI) request(ctx context.Context, method, path string, payload interface{}, result interface{}) error {
+	var body io.Reader
+	if payload != nil {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal payload: %w", err)
+		}
+		body = bytes.NewReader(data)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, body)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Cookie", a.cookie)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+
+	var baseResp struct {
+		Status  int             `json:"status"`
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(respData, &baseResp); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
+
+	if baseResp.Status != 200 || baseResp.Code != 0 {
+		return fmt.Errorf("api error %d: %s", baseResp.Code, baseResp.Message)
+	}
+
+	if result != nil {
+		return json.Unmarshal(baseResp.Data, result)
+	}
+	return nil
+}
+
+type PrecreateReq struct {
+	PdirFid   string `json:"pdir_fid"`
+	FileName  string `json:"file_name"`
+	Size      int64  `json:"size"`
+	Sha1      string `json:"sha1"`
+	ChunkSize int64  `json:"chunk_size"`
+}
+
+type PrecreateResp struct {
+	UploadID    string `json:"upload_id"`
+	RapidUpload bool   `json:"rapid_upload"`
+	PartSize    int64  `json:"part_size"`
+	FileID      string `json:"fid"`
+}
+
+func (a *QuarkAPI) Precreate(ctx context.Context, req *PrecreateReq) (*PrecreateResp, error) {
+	var resp PrecreateResp
+	err := a.request(ctx, http.MethodPost, apiPrecreate, req, &resp)
+	return &resp, err
+}
+
+type AuthReq struct {
+	UploadID string `json:"upload_id"`
+}
+
+type AuthResp struct {
+	Endpoint string `json:"endpoint"`
+}
+
+func (a *QuarkAPI) GetUploadAuth(ctx context.Context, uploadID string) (*AuthResp, error) {
+	req := AuthReq{UploadID: uploadID}
+	var resp AuthResp
+	err := a.request(ctx, http.MethodPost, apiAuth, req, &resp)
+	return &resp, err
+}
+
+func (a *QuarkAPI) UploadPart(ctx context.Context, ossURL string, data []byte, partNumber int, uploadID string) (string, error) {
+	if safe, reason := utils.IsURLSafe(ossURL); !safe {
+		return "", fmt.Errorf("ssrf blocked: %s", reason)
+	}
+
+	finalURL := fmt.Sprintf("%s?partNumber=%d&uploadId=%s", ossURL, partNumber, uploadID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, finalURL, bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("upload part failed: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("upload part failed with status %d", resp.StatusCode)
+	}
+
+	// Safe ETag extraction
+	etag := resp.Header.Get("ETag")
+	etag = strings.ReplaceAll(etag, string(rune(34)), "")
+	return etag, nil
+}
+
+type FinishReq struct {
+	UploadID string `json:"upload_id"`
+	Parts    []struct {
+		PartNumber int    `json:"part_number"`
+		ETag       string `json:"etag"`
+	} `json:"parts"`
+}
+
+func (a *QuarkAPI) FinishUpload(ctx context.Context, req *FinishReq) error {
+	return a.request(ctx, http.MethodPost, apiFinish, req, nil)
+}
+
+type ListReq struct {
+	PdirFid string `json:"pdir_fid"`
+	Page    int    `json:"page"`
+	Size    int    `json:"size"`
+	Sort    string `json:"sort"`
+	Order   string `json:"order"`
+}
+
+type FileItem struct {
+	Fid       string `json:"fid"`
+	FileName  string `json:"file_name"`
+	Size      int64  `json:"size"`
+	IsDir     bool   `json:"is_dir"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+type ListResp struct {
+	List  []FileItem `json:"list"`
+	Total int        `json:"total"`
+}
+
+func (a *QuarkAPI) List(ctx context.Context, req *ListReq) (*ListResp, error) {
+	var resp ListResp
+	err := a.request(ctx, http.MethodPost, apiList, req, &resp)
+	return &resp, err
+}
+
+type DownloadReq struct {
+	Fids []string `json:"fids"`
+}
+
+type DownloadItem struct {
+	DownloadURL string `json:"download_url"`
+	Fid         string `json:"fid"`
+}
+
+type DownloadResp struct {
+	List []DownloadItem `json:"list"`
+}
+
+func (a *QuarkAPI) GetDownloadURL(ctx context.Context, fid string) (string, error) {
+	req := DownloadReq{Fids: []string{fid}}
+	var resp DownloadResp
+	err := a.request(ctx, http.MethodPost, apiDownload, req, &resp)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.List) == 0 {
+		return "", fmt.Errorf("no download url found")
+	}
+	return resp.List[0].DownloadURL, nil
+}
+
+// ═══════════════════════════════════════════
+// File Info API
+// ═══════════════════════════════════════════
+
+const apiDetail = "/1/clouddrive/file/detail"
+
+type FileInfoReq struct {
+	Fid string `json:"fid"`
+}
+
+type FileInfoResp struct {
+	Fid       string `json:"fid"`
+	FileName  string `json:"file_name"`
+	Size      int64  `json:"size"`
+	IsDir     bool   `json:"is_dir"`
+	UpdatedAt int64  `json:"updated_at"`
+	Hash      string `json:"sha1,omitempty"`
+}
+
+func (a *QuarkAPI) GetFileInfo(ctx context.Context, fid string) (*FileInfoResp, error) {
+	req := FileInfoReq{Fid: fid}
+	var resp FileInfoResp
+	err := a.request(ctx, http.MethodPost, apiDetail, req, &resp)
+	return &resp, err
+}
+
+// ═══════════════════════════════════════════
+// File Copy API
+// ═══════════════════════════════════════════
+
+const apiCopy = "/1/clouddrive/file/copy"
+
+type CopyFileReq struct {
+	Fids    []string `json:"fids"`
+	PdirFid string   `json:"pdir_fid"`
+}
+
+func (a *QuarkAPI) CopyFile(ctx context.Context, srcFid, destDirFid string) error {
+	req := CopyFileReq{
+		Fids:    []string{srcFid},
+		PdirFid: destDirFid,
+	}
+	return a.request(ctx, http.MethodPost, apiCopy, req, nil)
+}
+
+// ═══════════════════════════════════════════
+// Share API
+// ═══════════════════════════════════════════
+
+const (
+	apiShareCreate = "/1/clouddrive/share"
+	apiShareList   = "/1/clouddrive/share/list"
+	apiShareDelete = "/1/clouddrive/share/delete"
+)
+
+type ShareCreateReq struct {
+	FidList    []string `json:"fid_list"`
+	ExpiredDay int      `json:"expired_day"` // -1 = permanent
+}
+
+type ShareCreateResp struct {
+	ShareID string `json:"share_id"`
+	URL     string `json:"url"`
+}
+
+func (a *QuarkAPI) CreateShare(ctx context.Context, fids []string, expiredDay int) (*ShareCreateResp, error) {
+	req := ShareCreateReq{
+		FidList:    fids,
+		ExpiredDay: expiredDay,
+	}
+	var resp ShareCreateResp
+	err := a.request(ctx, http.MethodPost, apiShareCreate, req, &resp)
+	return &resp, err
+}
+
+type ShareItem struct {
+	ShareID    string `json:"share_id"`
+	URL        string `json:"url"`
+	Title      string `json:"title"`
+	IsExpired  bool   `json:"is_expired"`
+	FileCount  int    `json:"file_count"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
+type ShareListResp struct {
+	List  []ShareItem `json:"list"`
+	Total int         `json:"total"`
+}
+
+func (a *QuarkAPI) ListShares(ctx context.Context, page, size int) (*ShareListResp, error) {
+	req := map[string]interface{}{
+		"page": page,
+		"size": size,
+	}
+	var resp ShareListResp
+	err := a.request(ctx, http.MethodPost, apiShareList, req, &resp)
+	return &resp, err
+}
+
+func (a *QuarkAPI) DeleteShare(ctx context.Context, shareIDs []string) error {
+	req := map[string]interface{}{
+		"share_id_list": shareIDs,
+	}
+	return a.request(ctx, http.MethodPost, apiShareDelete, req, nil)
+}
+
+// ═══════════════════════════════════════════
+// Search API
+// ═══════════════════════════════════════════
+
+const apiSearch = "/1/clouddrive/file/search"
+
+type SearchReq struct {
+	Q       string `json:"q"`
+	PdirFid string `json:"pdir_fid"`
+	Page    int    `json:"page"`
+	Size    int    `json:"size"`
+}
+
+func (a *QuarkAPI) SearchFiles(ctx context.Context, query, pdirFid string, page, size int) (*ListResp, error) {
+	req := SearchReq{
+		Q:       query,
+		PdirFid: pdirFid,
+		Page:    page,
+		Size:    size,
+	}
+	var resp ListResp
+	err := a.request(ctx, http.MethodPost, apiSearch, req, &resp)
+	return &resp, err
+}
+
+// ═══════════════════════════════════════════
+// Move & Rename API
+// ═══════════════════════════════════════════
+
+const (
+	apiMove   = "/1/clouddrive/file/move"
+	apiRename = "/1/clouddrive/file/rename"
+)
+
+type MoveFileReq struct {
+	Fids    []string `json:"fids"`
+	PdirFid string   `json:"pdir_fid"`
+}
+
+func (a *QuarkAPI) MoveFile(ctx context.Context, srcFid, destDirFid string) error {
+	req := MoveFileReq{
+		Fids:    []string{srcFid},
+		PdirFid: destDirFid,
+	}
+	return a.request(ctx, http.MethodPost, apiMove, req, nil)
+}
+
+type RenameFileReq struct {
+	Fid      string `json:"fid"`
+	FileName string `json:"file_name"`
+}
+
+func (a *QuarkAPI) RenameFile(ctx context.Context, fid, newName string) error {
+	req := RenameFileReq{
+		Fid:      fid,
+		FileName: newName,
+	}
+	return a.request(ctx, http.MethodPost, apiRename, req, nil)
+}
+
+// ═══════════════════════════════════════════
+// Quota / Space API
+// ═══════════════════════════════════════════
+
+const apiSpace = "/1/clouddrive/file/space"
+
+type SpaceResp struct {
+	TotalCapacity int64  `json:"total_capacity"`
+	UsedSpace     int64  `json:"used_space"`
+}
+
+func (a *QuarkAPI) GetSpace(ctx context.Context) (*SpaceResp, error) {
+	var resp SpaceResp
+	err := a.request(ctx, http.MethodGet, apiSpace, nil, &resp)
+	return &resp, err
+}
+
+// ═══════════════════════════════════════════
+// Recycle Bin API
+// ═══════════════════════════════════════════
+
+const (
+	apiRecycleList    = "/1/clouddrive/file/recycle/list"
+	apiRecycleRecover = "/1/clouddrive/file/recycle/recover"
+	apiRecycleDelete  = "/1/clouddrive/file/recycle/delete"
+)
+
+type RecycleListReq struct {
+	Page int `json:"page"`
+	Size int `json:"size"`
+}
+
+type RecycleItem struct {
+	Fid       string `json:"fid"`
+	FileName  string `json:"file_name"`
+	Size      int64  `json:"size"`
+	IsDir     bool   `json:"is_dir"`
+	DeletedAt int64  `json:"deleted_at"`
+}
+
+type RecycleListResp struct {
+	List  []RecycleItem `json:"list"`
+	Total int           `json:"total"`
+}
+
+func (a *QuarkAPI) ListRecycle(ctx context.Context, page, size int) (*RecycleListResp, error) {
+	req := RecycleListReq{Page: page, Size: size}
+	var resp RecycleListResp
+	err := a.request(ctx, http.MethodPost, apiRecycleList, req, &resp)
+	return &resp, err
+}
+
+func (a *QuarkAPI) RecoverRecycle(ctx context.Context, fids []string) error {
+	req := map[string]interface{}{"fid_list": fids}
+	return a.request(ctx, http.MethodPost, apiRecycleRecover, req, nil)
+}
+
+func (a *QuarkAPI) DeleteRecycle(ctx context.Context, fids []string) error {
+	req := map[string]interface{}{"fid_list": fids}
+	return a.request(ctx, http.MethodPost, apiRecycleDelete, req, nil)
+}
+
+// ═══════════════════════════════════════════
+// QR Login API
+// ═══════════════════════════════════════════
+
+const (
+	qrBaseURL    = "https://uop.quark.cn"
+	qrGenerate   = "/api/v1/auth/qrcode/generate"
+	qrQuery      = "/api/v1/auth/qrcode/query"
+	qrAuthorize  = "https://su.quark.cn/4_e3f80838a74530001d816a5628a6addd"
+)
+
+// QRTokenResp is the response from generating a QR code.
+type QRTokenResp struct {
+	Token string `json:"token"`
+	URL   string `json:"url"`
+}
+
+// GenerateQR creates a new QR login session and returns the token + login URL.
+func (a *QuarkAPI) GenerateQR(ctx context.Context) (*QRTokenResp, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, qrBaseURL+qrGenerate, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("generate QR failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var baseResp struct {
+		Status  int             `json:"status"`
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(respData, &baseResp); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	if baseResp.Status != 200 || baseResp.Code != 0 {
+		return nil, fmt.Errorf("api error %d: %s", baseResp.Code, baseResp.Message)
+	}
+
+	var qrResp QRTokenResp
+	if err := json.Unmarshal(baseResp.Data, &qrResp); err != nil {
+		return nil, fmt.Errorf("parse QR data: %w", err)
+	}
+	return &qrResp, nil
+}
+
+// QRStatus is the polling result for QR login status.
+type QRStatus string
+
+const (
+	QRNotScanned   QRStatus = "NOT_SCANNED"
+	QRScanned      QRStatus = "SCANNED"
+	QRConfirmed    QRStatus = "CONFIRMED"
+	QRExpired      QRStatus = "EXPIRED"
+	QRUnknownState QRStatus = "UNKNOWN"
+)
+
+// QRQueryResp is the response from polling QR status.
+type QRQueryResp struct {
+	Status      QRStatus `json:"status"`
+	Cookie      string   `json:"cookie"`
+	RedirectURL string   `json:"redirect_url"`
+	Message     string   `json:"message"`
+}
+
+// QueryQRStatus polls the QR login status.
+// Returns the status and optional cookie/redirect_url when confirmed.
+func (a *QuarkAPI) QueryQRStatus(ctx context.Context, token string) (*QRQueryResp, error) {
+	url := fmt.Sprintf("%s%s?token=%s", qrBaseURL, qrQuery, token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("query QR status failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var baseResp struct {
+		Status  int             `json:"status"`
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(respData, &baseResp); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	var qrResult QRQueryResp
+
+	// Quark uses status 200001 for not scanned, 200003 for scanned, 200004 for confirmed/expired
+	switch baseResp.Code {
+	case 0:
+		// Parsed as confirmed, try to extract cookie from data
+		if baseResp.Data != nil {
+			json.Unmarshal(baseResp.Data, &qrResult)
+		}
+		qrResult.Status = QRConfirmed
+		return &qrResult, nil
+	case 200001:
+		qrResult.Status = QRNotScanned
+		return &qrResult, nil
+	case 200003:
+		qrResult.Status = QRScanned
+		return &qrResult, nil
+	case 200004:
+		qrResult.Status = QRExpired
+		return &qrResult, nil
+	default:
+		qrResult.Status = QRUnknownState
+		qrResult.Message = baseResp.Message
+		return &qrResult, nil
+	}
+}
+
+
+/// --- ./backends/quark/driver.go --- ///
+
+package quark
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/Ab-code520/cloud-cli/core"
+	"github.com/Ab-code520/cloud-cli/utils"
+)
+
+type Driver struct {
+	api   *QuarkAPI
+	cache string
+}
+
+func NewDriver() core.Storage {
+	return &Driver{
+		cache: filepath.Join(os.Getenv("HOME"), ".cache", "cloud-cli", "upload_states"),
+	}
+}
+
+func init() {
+	core.Register("quark", NewDriver)
+}
+
+func (d *Driver) Name() string { return "quark" }
+
+func (d *Driver) Init(cfg map[string]string) error {
+	cookie := cfg["cookie"]
+	if cookie == "" {
+		return fmt.Errorf("cookie is required")
+	}
+	d.api = NewAPI(cookie)
+	if err := os.MkdirAll(d.cache, 0755); err != nil {
+		return fmt.Errorf("create cache dir: %w", err)
+	}
+	return nil
+}
+
+func (d *Driver) Close() error { return nil }
+
+func (d *Driver) List(ctx context.Context, pathOrID string) ([]*core.Object, error) {
+	req := ListReq{
+		PdirFid: pathOrID,
+		Page:    1,
+		Size:    100,
+		Sort:    "file_type",
+		Order:   "asc",
+	}
+	if pathOrID == "" {
+		req.PdirFid = "0"
+	}
+
+	resp, err := d.api.List(ctx, &req)
+	if err != nil {
+		return nil, err
+	}
+
+	objects := make([]*core.Object, 0, len(resp.List))
+	for _, item := range resp.List {
+		objects = append(objects, &core.Object{
+			ID:      item.Fid,
+			Name:    item.FileName,
+			Size:    item.Size,
+			IsDir:   item.IsDir,
+			ModTime: time.Unix(item.UpdatedAt, 0),
+			Path:    item.Fid,
+		})
+	}
+	return objects, nil
+}
+
+func (d *Driver) Open(ctx context.Context, obj *core.Object, offset int64) (io.ReadCloser, error) {
+	url, err := d.api.GetDownloadURL(ctx, obj.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+
+	resp, err := d.api.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("download request failed: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download failed with status %d", resp.StatusCode)
+	}
+
+	return resp.Body, nil
+}
+
+func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, name string, size int64) (*core.Object, error) {
+	var fileSHA1 string
+	var seekableFile *os.File
+
+	if f, ok := in.(*os.File); ok {
+		_, err := f.Seek(0, io.SeekStart)
+		if err != nil {
+			return nil, fmt.Errorf("cannot seek file: %w", err)
+		}
+		sha1, err := utils.CalcReaderSHA1(in)
+		if err != nil {
+			return nil, fmt.Errorf("calc sha1: %w", err)
+		}
+		fileSHA1 = sha1
+		_, err = f.Seek(0, io.SeekStart)
+		if err != nil {
+			return nil, fmt.Errorf("cannot rewind file: %w", err)
+		}
+		seekableFile = f
+	}
+
+	partSize := int64(10 * 1024 * 1024)
+	preResp, err := d.api.Precreate(ctx, &PrecreateReq{
+		PdirFid:   remoteDir.ID,
+		FileName:  name,
+		Size:      size,
+		Sha1:      fileSHA1,
+		ChunkSize: partSize,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("precreate failed: %w", err)
+	}
+
+	if preResp.RapidUpload {
+		return &core.Object{
+			ID:   preResp.FileID,
+			Name: name,
+			Size: size,
+		}, nil
+	}
+
+	uploadID := preResp.UploadID
+	partSize = preResp.PartSize
+	if partSize <= 0 {
+		partSize = 10 * 1024 * 1024
+	}
+	totalParts := int((size + partSize - 1) / partSize)
+
+	statePath := d.getStatePath(name, size, uploadID)
+	state := d.loadState(statePath)
+	if state == nil {
+		state = &core.UploadState{
+			UploadID:      uploadID,
+			TotalSize:     size,
+			PartSize:      partSize,
+			UploadedParts: []core.UploadPartInfo{},
+		}
+	}
+
+	auth, err := d.api.GetUploadAuth(ctx, uploadID)
+	if err != nil {
+		return nil, fmt.Errorf("get auth: %w", err)
+	}
+
+	pool := utils.NewPool(4)
+	var mu sync.Mutex
+
+	uploadedSet := make(map[int]string)
+	for _, p := range state.UploadedParts {
+		uploadedSet[p.PartNumber] = p.ETag
+	}
+
+	for pn := 1; pn <= totalParts; pn++ {
+		if ctx.Err() != nil {
+			break
+		}
+		if _, ok := uploadedSet[pn]; ok {
+			continue
+		}
+
+		partNum := pn
+		pool.Go(func(ctx context.Context) error {
+			offset := int64(partNum-1) * partSize
+			remSize := partSize
+			if offset+remSize > size {
+				remSize = size - offset
+			}
+
+			buf := make([]byte, remSize)
+			if seekableFile != nil {
+				_, err := seekableFile.ReadAt(buf, offset)
+				if err != nil && err != io.EOF {
+					return fmt.Errorf("read part %d: %w", partNum, err)
+				}
+			} else {
+				return fmt.Errorf("concurrent upload requires seekable input")
+			}
+
+			etag, err := d.api.UploadPart(ctx, auth.Endpoint, buf, partNum, uploadID)
+			if err != nil {
+				return err
+			}
+
+			mu.Lock()
+			uploadedSet[partNum] = etag
+			state.UploadedParts = append(state.UploadedParts, core.UploadPartInfo{
+				PartNumber: partNum,
+				ETag:       etag,
+			})
+			d.saveState(statePath, state)
+			mu.Unlock()
+
+			return nil
+		})
+	}
+
+	if err := pool.Wait(); err != nil {
+		return nil, fmt.Errorf("upload failed: %w", err)
+	}
+
+	finishReq := FinishReq{UploadID: uploadID}
+	sort.Slice(state.UploadedParts, func(i, j int) bool {
+		return state.UploadedParts[i].PartNumber < state.UploadedParts[j].PartNumber
+	})
+
+	for _, p := range state.UploadedParts {
+		finishReq.Parts = append(finishReq.Parts, struct{
+			PartNumber int    `json:"part_number"`
+			ETag       string `json:"etag"`
+		}{p.PartNumber, p.ETag})
+	}
+
+	if err := d.api.FinishUpload(ctx, &finishReq); err != nil {
+		return nil, fmt.Errorf("finish upload: %w", err)
+	}
+
+	os.Remove(statePath)
+
+	return &core.Object{
+		Name: name,
+		Size: size,
+	}, nil
+}
+
+func (d *Driver) User(ctx context.Context) (map[string]interface{}, error) { return nil, nil }
+func (d *Driver) Delete(ctx context.Context, obj *core.Object) error      { return nil }
+func (d *Driver) Mkdir(ctx context.Context, pathOrID string) (*core.Object, error)   { return nil, nil }
+
+func (d *Driver) Info(ctx context.Context, pathOrID string) (*core.Object, error) {
+	if pathOrID == "" {
+		pathOrID = "0" // Root
+	}
+	resp, err := d.api.GetFileInfo(ctx, pathOrID)
+	if err != nil {
+		return nil, err
+	}
+	return &core.Object{
+		ID:      resp.Fid,
+		Name:    resp.FileName,
+		Size:    resp.Size,
+		IsDir:   resp.IsDir,
+		ModTime: time.Unix(resp.UpdatedAt, 0),
+		Path:    resp.Fid,
+		Hash:    resp.Hash,
+	}, nil
+}
+
+func (d *Driver) Copy(ctx context.Context, src *core.Object, destDir *core.Object) error {
+	destID := destDir.ID
+	if destID == "" {
+		destID = "0"
+	}
+	return d.api.CopyFile(ctx, src.ID, destID)
+}
+
+func (d *Driver) CreateShare(ctx context.Context, fileIDs []string, expiredDay int) (string, error) {
+	resp, err := d.api.CreateShare(ctx, fileIDs, expiredDay)
+	if err != nil {
+		return "", err
+	}
+	return resp.URL, nil
+}
+
+func (d *Driver) ListShares(ctx context.Context, page, size int) ([]core.ShareInfo, error) {
+	resp, err := d.api.ListShares(ctx, page, size)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]core.ShareInfo, len(resp.List))
+	for i, item := range resp.List {
+		result[i].ShareID = item.ShareID
+		result[i].URL = item.URL
+		result[i].Title = item.Title
+		result[i].IsExpired = item.IsExpired
+		result[i].FileCount = item.FileCount
+		result[i].CreatedAt = item.CreatedAt
+	}
+	return result, nil
+}
+
+func (d *Driver) DeleteShare(ctx context.Context, shareIDs []string) error {
+	return d.api.DeleteShare(ctx, shareIDs)
+}
+
+func (d *Driver) Search(ctx context.Context, query, pdirFid string, page, size int) ([]*core.Object, error) {
+	resp, err := d.api.SearchFiles(ctx, query, pdirFid, page, size)
+	if err != nil {
+		return nil, err
+	}
+	objects := make([]*core.Object, 0, len(resp.List))
+	for _, item := range resp.List {
+		objects = append(objects, &core.Object{
+			ID:      item.Fid,
+			Name:    item.FileName,
+			Size:    item.Size,
+			IsDir:   item.IsDir,
+			ModTime: time.Unix(item.UpdatedAt, 0),
+			Path:    item.Fid,
+		})
+	}
+	return objects, nil
+}
+
+func (d *Driver) Move(ctx context.Context, src *core.Object, destDir *core.Object) error {
+	destID := destDir.ID
+	if destID == "" {
+		destID = "0"
+	}
+	return d.api.MoveFile(ctx, src.ID, destID)
+}
+
+func (d *Driver) Rename(ctx context.Context, obj *core.Object, newName string) error {
+	return d.api.RenameFile(ctx, obj.ID, newName)
+}
+
+func (d *Driver) Quota(ctx context.Context) (int64, int64, error) {
+	resp, err := d.api.GetSpace(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	return resp.TotalCapacity, resp.UsedSpace, nil
+}
+
+func (d *Driver) ListRecycle(ctx context.Context, page, size int) ([]core.RecycleItem, error) {
+	resp, err := d.api.ListRecycle(ctx, page, size)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]core.RecycleItem, len(resp.List))
+	for i, item := range resp.List {
+		result[i].FID = item.Fid
+		result[i].FileName = item.FileName
+		result[i].Size = item.Size
+		result[i].IsDir = item.IsDir
+		result[i].DeletedAt = item.DeletedAt
+	}
+	return result, nil
+}
+
+func (d *Driver) RecoverRecycle(ctx context.Context, fids []string) error {
+	return d.api.RecoverRecycle(ctx, fids)
+}
+
+func (d *Driver) DeleteRecycle(ctx context.Context, fids []string) error {
+	return d.api.DeleteRecycle(ctx, fids)
+}
+
+func (d *Driver) getStatePath(name string, size int64, uploadID string) string {
+	key := fmt.Sprintf("%s_%d_%s", name, size, uploadID)
+	hash := fmt.Sprintf("%x", []byte(key))
+	return filepath.Join(d.cache, hash+".json")
+}
+
+func (d *Driver) saveState(path string, state *core.UploadState) error {
+	data, _ := json.Marshal(state)
+	return os.WriteFile(path, data, 0644)
+}
+
+func (d *Driver) loadState(path string) *core.UploadState {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var s core.UploadState
+	if json.Unmarshal(data, &s) != nil {
+		return nil
+	}
+	return &s
+}

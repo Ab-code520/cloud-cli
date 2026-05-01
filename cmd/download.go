@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -23,7 +22,8 @@ var downloadCmd = &cobra.Command{
 		remotePath := args[0]
 		localPath := args[1]
 		
-		obj, err := findObjectByPath(driver, remotePath)
+		// Fix #8: Support recursive path finding
+		obj, err := findObjectByPathOrID(driver, remotePath)
 		if err != nil {
 			return err
 		}
@@ -32,7 +32,8 @@ var downloadCmd = &cobra.Command{
 			return fmt.Errorf("download does not support directories yet")
 		}
 		
-		reader, err := driver.Open(context.Background(), obj, 0)
+		// Fix #7: Use cmd.Context() for cancellation
+		reader, err := driver.Open(cmd.Context(), obj, 0)
 		if err != nil {
 			return err
 		}

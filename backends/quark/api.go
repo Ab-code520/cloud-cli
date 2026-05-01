@@ -422,6 +422,68 @@ const (
 	apiRecycleDelete  = "/1/clouddrive/file/recycle/delete"
 )
 
+// ═══════════════════════════════════════════
+// Mkdir API
+// ═══════════════════════════════════════════
+
+const apiMkdir = "/1/clouddrive/file"
+
+type MkdirReq struct {
+	PdirFid     string `json:"pdir_fid"`
+	DirName     string `json:"dir_name"`
+	DirInitLock bool   `json:"dir_init_lock"`
+}
+
+type MkdirResp struct {
+	Fid string `json:"fid"`
+}
+
+func (a *QuarkAPI) Mkdir(ctx context.Context, pdirFid, dirName string) (*MkdirResp, error) {
+	req := MkdirReq{
+		PdirFid:     pdirFid,
+		DirName:     dirName,
+		DirInitLock: false,
+	}
+	var resp MkdirResp
+	err := a.request(ctx, http.MethodPost, apiMkdir, req, &resp)
+	return &resp, err
+}
+
+// ═══════════════════════════════════════════
+// Delete API
+// ═══════════════════════════════════════════
+
+const apiDelete = "/1/clouddrive/file/delete"
+
+type DeleteItem struct {
+	Fid      string `json:"fid"`
+	PdirFid  string `json:"pdir_fid"`
+	FileType int    `json:"file_type"` // 0=file, 1=dir
+}
+
+type DeleteFileReq struct {
+	ActionType  int          `json:"action_type"` // 2=delete
+	DeleteFiles []DeleteItem `json:"delete_files"`
+}
+
+func (a *QuarkAPI) DeleteFile(ctx context.Context, fid, pdirFid string, isDir bool) error {
+	ft := 0
+	if isDir {
+		ft = 1
+	}
+	req := DeleteFileReq{
+		ActionType: 2,
+		DeleteFiles: []DeleteItem{
+			{
+				Fid:      fid,
+				PdirFid:  pdirFid,
+				FileType: ft,
+			},
+		},
+	}
+	return a.request(ctx, http.MethodPost, apiDelete, req, nil)
+}
+
 type RecycleListReq struct {
 	Page int `json:"page"`
 	Size int `json:"size"`

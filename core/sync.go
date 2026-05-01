@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -39,15 +40,31 @@ func (s *Syncer) Sync(ctx context.Context, srcPath, destPath string) error {
 	// 1. List Source
 	srcFiles, err := s.Source.List(ctx, srcPath)
 	if err != nil {
-		return fmt.Errorf("list source: %w", err)
+		// If source dir is empty or doesn't exist
+		if err.Error() == "read dir: no such file or directory" || strings.Contains(err.Error(), "no such file") {
+			srcFiles = []*Object{}
+		} else {
+			return fmt.Errorf("list source: %w", err)
+		}
 	}
 
 	// 2. List Dest
 	destFiles, err := s.Dest.List(ctx, destPath)
 	if err != nil {
-		// If dest doesn't exist, we might need to create it?
-		// Or it's an error.
-		return fmt.Errorf("list dest: %w", err)
+		// Fix #9: If dest doesn't exist, try to create it
+		if strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "not found") {
+			if !s.Config.DryRun {
+				_, err = s.Dest.Mkdir(ctx, destPath)
+				if err != nil {
+					return fmt.Errorf("create dest dir %s: %w", destPath, err)
+				}
+			} else {
+				s.reportAction(&SyncAction{Type: "mkdir", Object: &Object{Name: filepath.Base(destPath)}, Reason: "Create destination dir"})
+			}
+			destFiles = []*Object{} // Assume empty after creation
+		} else {
+			return fmt.Errorf("list dest: %w", err)
+		}
 	}
 
 	// 3. Build maps
@@ -77,7 +94,10 @@ func (s *Syncer) Sync(ctx context.Context, srcPath, destPath string) error {
 				if s.Config.DryRun {
 					s.reportAction(&SyncAction{Type: "mkdir", Object: srcObj, Reason: "Directory missing in dest"})
 				} else {
-					_, _ = s.Dest.Mkdir(ctx, relativeDest)
+					_, err := s.Dest.Mkdir(ctx, relativeDest)
+					if err != nil {
+						s.reportAction(&SyncAction{Type: "error", Object: srcObj, Reason: fmt.Sprintf("Mkdir failed: %v", err)})
+					}
 				}
 			}
 			
@@ -98,8 +118,6 @@ func (s *Syncer) Sync(ctx context.Context, srcPath, destPath string) error {
 			}
 		} else {
 			// File exists, check if update needed
-			// Simple comparison: Size or ModTime
-			// Note: ModTime precision might differ.
 			if s.needsUpdate(srcObj, destObj) {
 				s.reportAction(&SyncAction{Type: "update", Object: srcObj, Reason: "Modified"})
 				if !s.Config.DryRun {
@@ -122,6 +140,7 @@ func (s *Syncer) Sync(ctx context.Context, srcPath, destPath string) error {
 					if err := s.Dest.Delete(ctx, &Object{
 						Path: filepath.Join(destPath, destObj.Name),
 						IsDir: destObj.IsDir,
+						RawData: destObj.RawData, // Preserve parent ID for delete
 					}); err != nil {
 						return fmt.Errorf("delete %s: %w", destObj.Name, err)
 					}
@@ -134,16 +153,24 @@ func (s *Syncer) Sync(ctx context.Context, srcPath, destPath string) error {
 }
 
 // needsUpdate returns true if srcObj should overwrite destObj.
+// Fix #3 & #11: Improved logic with Hash check.
 func (s *Syncer) needsUpdate(src, dest *Object) bool {
 	if src.Size != dest.Size {
 		return true
 	}
-	// Allow 2 seconds drift for timestamp inaccuracies
+	
+	// If both have Hash, compare it (most accurate)
+	if src.Hash != "" && dest.Hash != "" && src.Hash != dest.Hash {
+		return true
+	}
+	
+	// If Hash is unavailable, fallback to ModTime with large tolerance
+	// Cloud ModTime is often upload time, so allow 24 hours drift
 	diff := src.ModTime.Sub(dest.ModTime)
 	if diff < 0 {
 		diff = -diff
 	}
-	return diff > 2*time.Second
+	return diff > 24*time.Hour
 }
 
 func (s *Syncer) uploadFile(ctx context.Context, srcObj *Object, srcDir, destDir string) error {

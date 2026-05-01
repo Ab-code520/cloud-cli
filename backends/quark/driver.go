@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,34 +49,48 @@ func (d *Driver) Init(cfg map[string]string) error {
 func (d *Driver) Close() error { return nil }
 
 func (d *Driver) List(ctx context.Context, pathOrID string) ([]*core.Object, error) {
-	req := ListReq{
-		PdirFid: pathOrID,
-		Page:    1,
-		Size:    100,
-		Sort:    "file_type",
-		Order:   "asc",
-	}
-	if pathOrID == "" {
-		req.PdirFid = "0"
+	pdirFid := pathOrID
+	if pdirFid == "" {
+		pdirFid = "0"
 	}
 
-	resp, err := d.api.List(ctx, &req)
-	if err != nil {
-		return nil, err
-	}
+	var allObjects []*core.Object
+	page := 1
+	for {
+		req := ListReq{
+			PdirFid: pdirFid,
+			Page:    page,
+			Size:    1000,
+			Sort:    "file_type",
+			Order:   "asc",
+		}
+		resp, err := d.api.List(ctx, &req)
+		if err != nil {
+			return nil, err
+		}
 
-	objects := make([]*core.Object, 0, len(resp.List))
-	for _, item := range resp.List {
-		objects = append(objects, &core.Object{
-			ID:      item.Fid,
-			Name:    item.FileName,
-			Size:    item.Size,
-			IsDir:   item.IsDir,
-			ModTime: time.Unix(item.UpdatedAt, 0),
-			Path:    item.Fid,
-		})
+		for _, item := range resp.List {
+			// Store parent ID in RawData for Delete/Mkdir usage
+			meta := map[string]interface{}{"parent_id": pdirFid}
+			
+		allObjects = append(allObjects, &core.Object{
+				ID:      item.Fid,
+				Name:    item.FileName,
+				Size:    item.Size,
+				IsDir:   item.IsDir,
+				ModTime: time.Unix(item.UpdatedAt, 0),
+				Path:    item.Fid, // Keep Path as ID for compatibility
+				Hash:    "",       // List API might not return Hash, need Info for that
+				RawData: meta,
+			})
+		}
+
+		if len(resp.List) < req.Size {
+			break
+		}
+		page++
 	}
-	return objects, nil
+	return allObjects, nil
 }
 
 func (d *Driver) Open(ctx context.Context, obj *core.Object, offset int64) (io.ReadCloser, error) {
@@ -111,26 +126,36 @@ func (d *Driver) Open(ctx context.Context, obj *core.Object, offset int64) (io.R
 
 func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, name string, size int64) (*core.Object, error) {
 	var fileSHA1 string
-	var seekableFile *os.File
+	var fileReader io.ReaderAt
 
-	if f, ok := in.(*os.File); ok {
-		_, err := f.Seek(0, io.SeekStart)
-		if err != nil {
-			return nil, fmt.Errorf("cannot seek file: %w", err)
+	// Fix #6: Support io.ReaderAt interface instead of strict *os.File
+	if ra, ok := in.(io.ReaderAt); ok {
+		fileReader = ra
+		// If it's a file, rewind and calc SHA1
+		if f, ok := in.(*os.File); ok {
+			_, err := f.Seek(0, io.SeekStart)
+			if err != nil {
+				return nil, fmt.Errorf("cannot seek file: %w", err)
+			}
+			sha1, err := utils.CalcReaderSHA1(in)
+			if err != nil {
+				return nil, fmt.Errorf("calc sha1: %w", err)
+			}
+			fileSHA1 = sha1
+			_, err = f.Seek(0, io.SeekStart)
+			if err != nil {
+				return nil, fmt.Errorf("cannot rewind file: %w", err)
+			}
 		}
-		sha1, err := utils.CalcReaderSHA1(in)
-		if err != nil {
-			return nil, fmt.Errorf("calc sha1: %w", err)
-		}
-		fileSHA1 = sha1
-		_, err = f.Seek(0, io.SeekStart)
-		if err != nil {
-			return nil, fmt.Errorf("cannot rewind file: %w", err)
-		}
-		seekableFile = f
+	} else {
+		// If not ReaderAt, we can't do concurrent multipart. Fallback or Error.
+		// For cloud-cli, we usually pass a file, so this is rare.
+		return nil, fmt.Errorf("upload requires io.ReaderAt support for concurrent multipart")
 	}
 
-	partSize := int64(10 * 1024 * 1024)
+	// Fix #5: Dynamic Part Size
+	partSize := int64(10 * 1024 * 1024) // 10MB default
+	
 	preResp, err := d.api.Precreate(ctx, &PrecreateReq{
 		PdirFid:   remoteDir.ID,
 		FileName:  name,
@@ -155,6 +180,12 @@ func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, 
 	if partSize <= 0 {
 		partSize = 10 * 1024 * 1024
 	}
+	
+	// Enforce limit: Max ~9000 parts per file for OSS/S3
+	if size/partSize > 9000 {
+		partSize = (size / 9000) + (1024 * 1024) // Ensure > 10MB to reduce part count
+	}
+	
 	totalParts := int((size + partSize - 1) / partSize)
 
 	statePath := d.getStatePath(name, size, uploadID)
@@ -175,6 +206,13 @@ func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, 
 
 	pool := utils.NewPool(4)
 	var mu sync.Mutex
+
+	// Fix #12: Buffer Pool
+	bufPool := &sync.Pool{
+		New: func() interface{} {
+			return make([]byte, partSize)
+		},
+	}
 
 	uploadedSet := make(map[int]string)
 	for _, p := range state.UploadedParts {
@@ -197,19 +235,33 @@ func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, 
 				remSize = size - offset
 			}
 
-			buf := make([]byte, remSize)
-			if seekableFile != nil {
-				_, err := seekableFile.ReadAt(buf, offset)
-				if err != nil && err != io.EOF {
-					return fmt.Errorf("read part %d: %w", partNum, err)
-				}
-			} else {
-				return fmt.Errorf("concurrent upload requires seekable input")
+			// Get buffer from pool
+			buf := bufPool.Get().([]byte)
+			defer bufPool.Put(buf) // Return buffer to pool
+
+			// Read part
+			buf = buf[:remSize]
+			_, err := fileReader.ReadAt(buf, offset)
+			if err != nil && err != io.EOF {
+				return fmt.Errorf("read part %d: %w", partNum, err)
 			}
 
-			etag, err := d.api.UploadPart(ctx, auth.Endpoint, buf, partNum, uploadID)
-			if err != nil {
-				return err
+			// Fix #4: Local Retry with Exponential Backoff
+			var etag string
+			var lastErr error
+			for attempt := 1; attempt <= 3; attempt++ {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				etag, lastErr = d.api.UploadPart(ctx, auth.Endpoint, buf, partNum, uploadID)
+				if lastErr == nil {
+					break
+				}
+				time.Sleep(time.Duration(attempt) * 2 * time.Second)
+			}
+			
+			if lastErr != nil {
+				return fmt.Errorf("part %d failed after 3 attempts: %w", partNum, lastErr)
 			}
 
 			mu.Lock()
@@ -235,7 +287,7 @@ func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, 
 	})
 
 	for _, p := range state.UploadedParts {
-		finishReq.Parts = append(finishReq.Parts, struct{
+		finishReq.Parts = append(finishReq.Parts, struct {
 			PartNumber int    `json:"part_number"`
 			ETag       string `json:"etag"`
 		}{p.PartNumber, p.ETag})
@@ -253,9 +305,105 @@ func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, 
 	}, nil
 }
 
-func (d *Driver) User(ctx context.Context) (map[string]interface{}, error) { return nil, nil }
-func (d *Driver) Delete(ctx context.Context, obj *core.Object) error      { return nil }
-func (d *Driver) Mkdir(ctx context.Context, pathOrID string) (*core.Object, error)   { return nil, nil }
+func (d *Driver) User(ctx context.Context) (map[string]interface{}, error) {
+	space, err := d.api.GetSpace(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("fetch user info failed: %w", err)
+	}
+	return map[string]interface{}{
+		"type":       "Quark Drive",
+		"space_used": space.UsedSpace,
+		"space_total": space.TotalCapacity,
+	}, nil
+}
+
+func (d *Driver) Delete(ctx context.Context, obj *core.Object) error {
+	pdirFid := "0"
+	if obj.RawData != nil {
+		if meta, ok := obj.RawData.(map[string]interface{}); ok {
+			if pid, ok := meta["parent_id"].(string); ok {
+				pdirFid = pid
+			}
+		}
+	}
+	return d.api.DeleteFile(ctx, obj.ID, pdirFid, obj.IsDir)
+}
+
+// resolvePathToParent splits a path (e.g., "/a/b/newdir" or "newdir") into (ParentID, DirName).
+// It recursively resolves intermediate folders to find the ParentID.
+func (d *Driver) resolvePathToParent(ctx context.Context, pathOrID string) (string, string) {
+	// Clean path
+	pathOrID = strings.Trim(pathOrID, "/")
+	if pathOrID == "" {
+		return "0", ""
+	}
+
+	parts := strings.Split(pathOrID, "/")
+	if len(parts) == 1 {
+		return "0", parts[0]
+	}
+
+	// Resolve parent path
+	parentPath := strings.Join(parts[:len(parts)-1], "/")
+	dirName := parts[len(parts)-1]
+
+	parentID, err := d.resolvePath(ctx, parentPath)
+	if err != nil {
+		return "0", dirName // Fallback
+	}
+	return parentID, dirName
+}
+
+// resolvePath converts a relative path (e.g. "folder/subfolder") to a File ID.
+func (d *Driver) resolvePath(ctx context.Context, path string) (string, error) {
+	if path == "" {
+		return "0", nil
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	currentID := "0"
+
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		// List current directory
+		objs, err := d.List(ctx, currentID)
+		if err != nil {
+			return "", err
+		}
+		found := false
+		for _, obj := range objs {
+			if obj.Name == part && obj.IsDir {
+				currentID = obj.ID
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("directory '%s' not found in '%s'", part, currentID)
+		}
+	}
+	return currentID, nil
+}
+
+func (d *Driver) Mkdir(ctx context.Context, pathOrID string) (*core.Object, error) {
+	parentID, name := d.resolvePathToParent(ctx, pathOrID)
+	if parentID == "" || name == "" {
+		return nil, fmt.Errorf("invalid path for mkdir: %s", pathOrID)
+	}
+	resp, err := d.api.Mkdir(ctx, parentID, name)
+	if err != nil {
+		return nil, err
+	}
+	meta := map[string]interface{}{"parent_id": parentID}
+	return &core.Object{
+		ID:      resp.Fid,
+		Name:    name,
+		IsDir:   true,
+		Path:    pathOrID,
+		RawData: meta,
+	}, nil
+}
 
 func (d *Driver) Info(ctx context.Context, pathOrID string) (*core.Object, error) {
 	if pathOrID == "" {
