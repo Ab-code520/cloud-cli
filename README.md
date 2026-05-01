@@ -60,20 +60,7 @@ go build -o cloud-cli .
 sudo mv cloud-cli /usr/local/bin/
 ```
 
-### 方式三：使用 Homebrew (macOS/Linux) / Use Homebrew
-
-```bash
-# Add our tap
-brew tap Ab-code520/tap
-
-# Install
-brew install cloud-cli
-
-# Upgrade
-brew upgrade cloud-cli
-```
-
-### 方式四：使用 Go install / Go Install
+### 方式三：使用 Go install / Go Install
 
 ```bash
 go install github.com/Ab-code520/cloud-cli@latest
