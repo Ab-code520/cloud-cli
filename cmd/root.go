@@ -111,3 +111,7 @@ func getDriver() (core.Storage, error) {
 
 	return initDriver(acc.Type, "")
 }
+
+func init() {
+	rootCmd.PersistentFlags().StringVarP(&outputFormat, "output", "o", "table", "Output format: table, json")
+}

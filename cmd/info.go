@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/Ab-code520/cloud-cli/core"
 	"github.com/spf13/cobra"
 )
 
@@ -24,29 +23,26 @@ var infoCmd = &cobra.Command{
 			return err
 		}
 
-		printObject(obj, true)
-		return nil
+		return outputTableOrJSON(obj, func() {
+			typeStr := "File"
+			if obj.IsDir {
+				typeStr = "Folder"
+			}
+
+			fmt.Printf("📂 Name: %s\n", obj.Name)
+			fmt.Printf("🆔 ID: %s\n", obj.ID)
+			fmt.Printf("📦 Type: %s\n", typeStr)
+			
+			if !obj.IsDir {
+				fmt.Printf("💾 Size: %s\n", formatSize(obj.Size))
+				if obj.Hash != "" {
+					fmt.Printf("#️⃣ SHA1: %s\n", obj.Hash)
+				}
+			}
+			
+			fmt.Printf("🕒 Modified: %s\n", obj.ModTime.Format("2006-01-02 15:04:05"))
+		})
 	},
-}
-
-func printObject(obj *core.Object, detailed bool) {
-	typeStr := "File"
-	if obj.IsDir {
-		typeStr = "Folder"
-	}
-
-	fmt.Printf("📂 Name: %s\n", obj.Name)
-	fmt.Printf("🆔 ID: %s\n", obj.ID)
-	fmt.Printf("📦 Type: %s\n", typeStr)
-	
-	if !obj.IsDir {
-		fmt.Printf("💾 Size: %s\n", formatSize(obj.Size))
-		if obj.Hash != "" {
-			fmt.Printf("#️⃣ SHA1: %s\n", obj.Hash)
-		}
-	}
-	
-	fmt.Printf("🕒 Modified: %s\n", obj.ModTime.Format("2006-01-02 15:04:05"))
 }
 
 func init() {

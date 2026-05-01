@@ -41,24 +41,28 @@ Examples:
 		}
 
 		if len(results) == 0 {
+			if outputFormat == "json" {
+				return outputTableOrJSON([]interface{}{}, func() {})
+			}
 			fmt.Printf("🔍 No results found for '%s'\n", query)
 			return nil
 		}
 
-		fmt.Printf("🔍 Found %d results for '%s':\n\n", len(results), query)
-		for _, obj := range results {
-			typeIcon := "📄"
-			if obj.IsDir {
-				typeIcon = "📁"
+		return outputTableOrJSON(results, func() {
+			fmt.Printf("🔍 Found %d results for '%s':\n\n", len(results), query)
+			for _, obj := range results {
+				typeIcon := "📄"
+				if obj.IsDir {
+					typeIcon = "📁"
+				}
+				sizeStr := ""
+				if !obj.IsDir {
+					sizeStr = fmt.Sprintf(" (%s)", formatSize(obj.Size))
+				}
+				fmt.Printf("%s %s%s\n", typeIcon, obj.Name, sizeStr)
+				fmt.Printf("   🆔 %s | 📅 %s\n\n", obj.ID, obj.ModTime.Format("2006-01-02"))
 			}
-			sizeStr := ""
-			if !obj.IsDir {
-				sizeStr = fmt.Sprintf(" (%s)", formatSize(obj.Size))
-			}
-			fmt.Printf("%s %s%s\n", typeIcon, obj.Name, sizeStr)
-			fmt.Printf("   🆔 %s | 📅 %s\n\n", obj.ID, obj.ModTime.Format("2006-01-02"))
-		}
-		return nil
+		})
 	},
 }
 

@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -22,26 +21,27 @@ var lsCmd = &cobra.Command{
 			path = args[0]
 		}
 		
-		objects, err := driver.List(context.Background(), path)
+		objects, err := driver.List(cmd.Context(), path)
 		if err != nil {
 			return err
 		}
 		
-		fmt.Printf("%-30s %-10s %s\n", "NAME", "SIZE", "TIME")
-		for _, obj := range objects {
-			size := "-"
-			if !obj.IsDir {
-				size = formatSize(obj.Size)
-			} else {
-				size = "DIR"
+		return outputTableOrJSON(objects, func() {
+			fmt.Printf("%-30s %-10s %s\n", "NAME", "SIZE", "TIME")
+			for _, obj := range objects {
+				size := "-"
+				if !obj.IsDir {
+					size = formatSize(obj.Size)
+				} else {
+					size = "DIR"
+				}
+				name := obj.Name
+				if obj.IsDir {
+					name += "/"
+				}
+				fmt.Printf("%-30s %-10s %s\n", name, size, obj.ModTime.Format("2006-01-02 15:04"))
 			}
-			name := obj.Name
-			if obj.IsDir {
-				name += "/"
-			}
-			fmt.Printf("%-30s %-10s %s\n", name, size, obj.ModTime.Format("2006-01-02 15:04"))
-		}
-		return nil
+		})
 	},
 }
 

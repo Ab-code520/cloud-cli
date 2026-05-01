@@ -60,7 +60,20 @@ go build -o cloud-cli .
 sudo mv cloud-cli /usr/local/bin/
 ```
 
-### 方式三：使用 Go install / Go Install
+### 方式三：使用 Homebrew (macOS/Linux) / Use Homebrew
+
+```bash
+# Add our tap
+brew tap Ab-code520/tap
+
+# Install
+brew install cloud-cli
+
+# Upgrade
+brew upgrade cloud-cli
+```
+
+### 方式四：使用 Go install / Go Install
 
 ```bash
 go install github.com/Ab-code520/cloud-cli@latest
@@ -258,6 +271,33 @@ cloud-cli upload ./file.txt /dest/ --policy overwrite
 
 # 仅在文件有变化时上传 / Upload only if modified
 cloud-cli upload ./file.txt /dest/ --policy rsync
+```
+
+### JSON 输出 / JSON Output
+
+所有列表和查询命令都支持 `--output json` (或 `-o json`) 参数，方便与其他脚本或工具集成：
+
+```bash
+# 以 JSON 格式列出文件 / List files as JSON
+cloud-cli ls -o json
+
+# 输出示例：
+# [
+#   {
+#     "id": "file_id_1",
+#     "name": "document.pdf",
+#     "size": 1048576,
+#     "is_dir": false,
+#     "mod_time": "2026-01-01T12:00:00Z",
+#     "path": "/document.pdf"
+#   }
+# ]
+
+# 结合 jq 使用 / Pipe to jq
+cloud-cli ls -o json | jq '.[].name'
+
+# 查看空间使用情况 / Check quota as JSON
+cloud-cli quota -o json
 ```
 
 ### 同步预览 / Sync Dry Run
