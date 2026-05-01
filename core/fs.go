@@ -86,6 +86,18 @@ type Storage interface {
 	// Search searches for files/folders by query.
 	Search(ctx context.Context, query, pdirFid string, page, size int) ([]*Object, error)
 
+	// Quota returns the storage space usage.
+	Quota(ctx context.Context) (*struct{ Total, Used int64 }, error)
+
+	// ListRecycle lists items in the recycle bin.
+	ListRecycle(ctx context.Context, page, size int) ([]struct{ Fid, FileName string; Size int64; IsDir bool; DeletedAt int64 }, error)
+
+	// RecoverRecycle recovers items from the recycle bin.
+	RecoverRecycle(ctx context.Context, fids []string) error
+
+	// DeleteRecycle permanently deletes items from the recycle bin.
+	DeleteRecycle(ctx context.Context, fids []string) error
+
 	// Close releases any resources held by the driver.
 	Close() error
 }

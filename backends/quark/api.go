@@ -361,6 +361,103 @@ func (a *QuarkAPI) SearchFiles(ctx context.Context, query, pdirFid string, page,
 }
 
 // ═══════════════════════════════════════════
+// Move & Rename API
+// ═══════════════════════════════════════════
+
+const (
+	apiMove   = "/1/clouddrive/file/move"
+	apiRename = "/1/clouddrive/file/rename"
+)
+
+type MoveFileReq struct {
+	Fids    []string `json:"fids"`
+	PdirFid string   `json:"pdir_fid"`
+}
+
+func (a *QuarkAPI) MoveFile(ctx context.Context, srcFid, destDirFid string) error {
+	req := MoveFileReq{
+		Fids:    []string{srcFid},
+		PdirFid: destDirFid,
+	}
+	return a.request(ctx, http.MethodPost, apiMove, req, nil)
+}
+
+type RenameFileReq struct {
+	Fid      string `json:"fid"`
+	FileName string `json:"file_name"`
+}
+
+func (a *QuarkAPI) RenameFile(ctx context.Context, fid, newName string) error {
+	req := RenameFileReq{
+		Fid:      fid,
+		FileName: newName,
+	}
+	return a.request(ctx, http.MethodPost, apiRename, req, nil)
+}
+
+// ═══════════════════════════════════════════
+// Quota / Space API
+// ═══════════════════════════════════════════
+
+const apiSpace = "/1/clouddrive/file/space"
+
+type SpaceResp struct {
+	TotalCapacity int64  `json:"total_capacity"`
+	UsedSpace     int64  `json:"used_space"`
+}
+
+func (a *QuarkAPI) GetSpace(ctx context.Context) (*SpaceResp, error) {
+	var resp SpaceResp
+	err := a.request(ctx, http.MethodGet, apiSpace, nil, &resp)
+	return &resp, err
+}
+
+// ═══════════════════════════════════════════
+// Recycle Bin API
+// ═══════════════════════════════════════════
+
+const (
+	apiRecycleList    = "/1/clouddrive/file/recycle/list"
+	apiRecycleRecover = "/1/clouddrive/file/recycle/recover"
+	apiRecycleDelete  = "/1/clouddrive/file/recycle/delete"
+)
+
+type RecycleListReq struct {
+	Page int `json:"page"`
+	Size int `json:"size"`
+}
+
+type RecycleItem struct {
+	Fid       string `json:"fid"`
+	FileName  string `json:"file_name"`
+	Size      int64  `json:"size"`
+	IsDir     bool   `json:"is_dir"`
+	DeletedAt int64  `json:"deleted_at"`
+}
+
+type RecycleListResp struct {
+	List  []RecycleItem `json:"list"`
+	Total int           `json:"total"`
+}
+
+func (a *QuarkAPI) ListRecycle(ctx context.Context, page, size int) (*RecycleListResp, error) {
+	req := RecycleListReq{Page: page, Size: size}
+	var resp RecycleListResp
+	err := a.request(ctx, http.MethodPost, apiRecycleList, req, &resp)
+	return &resp, err
+}
+
+func (a *QuarkAPI) RecoverRecycle(ctx context.Context, fids []string) error {
+	req := map[string]interface{}{"fid_list": fids}
+	return a.request(ctx, http.MethodPost, apiRecycleRecover, req, nil)
+}
+
+func (a *QuarkAPI) DeleteRecycle(ctx context.Context, fids []string) error {
+	req := map[string]interface{}{"fid_list": fids}
+	return a.request(ctx, http.MethodPost, apiRecycleDelete, req, nil)
+}
+
+// ═══════════════════════════════════════════
 // QR Login API
 // ═══════════════════════════════════════════
 

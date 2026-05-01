@@ -251,10 +251,6 @@ func (d *Driver) Put(ctx context.Context, in io.Reader, remoteDir *core.Object, 
 
 func (d *Driver) User(ctx context.Context) (map[string]interface{}, error) { return nil, nil }
 func (d *Driver) Delete(ctx context.Context, obj *core.Object) error      { return nil }
-func (d *Driver) Move(ctx context.Context, src *core.Object, destDir *core.Object) error {
-	return nil
-}
-func (d *Driver) Rename(ctx context.Context, obj *core.Object, newName string) error { return nil }
 func (d *Driver) Mkdir(ctx context.Context, pathOrID string) (*core.Object, error)   { return nil, nil }
 
 func (d *Driver) Info(ctx context.Context, pathOrID string) (*core.Object, error) {
@@ -333,6 +329,50 @@ func (d *Driver) Search(ctx context.Context, query, pdirFid string, page, size i
 		})
 	}
 	return objects, nil
+}
+
+func (d *Driver) Move(ctx context.Context, src *core.Object, destDir *core.Object) error {
+	destID := destDir.ID
+	if destID == "" {
+		destID = "0"
+	}
+	return d.api.MoveFile(ctx, src.ID, destID)
+}
+
+func (d *Driver) Rename(ctx context.Context, obj *core.Object, newName string) error {
+	return d.api.RenameFile(ctx, obj.ID, newName)
+}
+
+func (d *Driver) Quota(ctx context.Context) (*struct{ Total, Used int64 }, error) {
+	resp, err := d.api.GetSpace(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &struct{ Total, Used int64 }{Total: resp.TotalCapacity, Used: resp.UsedSpace}, nil
+}
+
+func (d *Driver) ListRecycle(ctx context.Context, page, size int) ([]struct{ Fid, FileName string; Size int64; IsDir bool; DeletedAt int64 }, error) {
+	resp, err := d.api.ListRecycle(ctx, page, size)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]struct{ Fid, FileName string; Size int64; IsDir bool; DeletedAt int64 }, len(resp.List))
+	for i, item := range resp.List {
+		result[i].Fid = item.Fid
+		result[i].FileName = item.FileName
+		result[i].Size = item.Size
+		result[i].IsDir = item.IsDir
+		result[i].DeletedAt = item.DeletedAt
+	}
+	return result, nil
+}
+
+func (d *Driver) RecoverRecycle(ctx context.Context, fids []string) error {
+	return d.api.RecoverRecycle(ctx, fids)
+}
+
+func (d *Driver) DeleteRecycle(ctx context.Context, fids []string) error {
+	return d.api.DeleteRecycle(ctx, fids)
 }
 
 func (d *Driver) getStatePath(name string, size int64, uploadID string) string {
